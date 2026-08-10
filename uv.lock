@@ -259,15 +259,15 @@ wheels = [
 
 [[package]]
 name = "lastfm-export"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9c/cb/750066b210fe6cb7be40772537d3c8305d7da5a0bd74cac7151f83aeaa09/lastfm_export-0.2.0.tar.gz", hash = "sha256:075d2f383c47c5800e43874bfdb49a5291a7280126ebbc45f5f0e53879cfddec", size = 56064, upload-time = "2026-08-09T00:17:08.717Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/83/e8/74cf95d94844686a6c36fd47db4f4facb27b2751013afe922f1d2f5269ba/lastfm_export-0.3.0.tar.gz", hash = "sha256:2c496abba185d2ed8139f16b2c96fcba729429a817d05c931540b37f63de4d36", size = 64487, upload-time = "2026-08-10T23:07:15.882Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/46/b3/42a5e16db5039d63c0b6f0d75d19d3f3ff7eb0b2e7e8e0d4132ec272ec30/lastfm_export-0.2.0-py3-none-any.whl", hash = "sha256:2c9083c5a5c7a2aff37272390adbcd1dacc7cb92d0b6543522d5bbb467622abc", size = 22768, upload-time = "2026-08-09T00:17:07.731Z" },
+    { url = "https://files.pythonhosted.org/packages/56/33/59b3a0a4cf688decca881d6527850165875700278fcc20a1230cef5413f8/lastfm_export-0.3.0-py3-none-any.whl", hash = "sha256:d33b912d1f652a2ad0d3c84125e205b6b62eef1c820ac65e0f16c136b4601477", size = 28943, upload-time = "2026-08-10T23:07:15.036Z" },
 ]
 
 [package.optional-dependencies]
@@ -798,7 +798,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lastfm-export", extras = ["dotenv"], specifier = ">=0.2.0" },
+    { name = "lastfm-export", extras = ["dotenv"], specifier = ">=0.3.0" },
     { name = "marimo", specifier = ">=0.23.16" },
     { name = "polars", specifier = ">=1.43.2" },
     { name = "pyarrow", specifier = ">=25.0.0" },
