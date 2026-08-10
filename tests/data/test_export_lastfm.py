@@ -1,11 +1,17 @@
 import json
 from datetime import UTC, datetime
+from io import StringIO
 
 import pytest
 from lastfm_export.integrity import WindowReport
 from lastfm_export.models import Scrobble
 
 from sonora.data import export_lastfm
+
+
+class _TTYStream(StringIO):
+    def isatty(self) -> bool:
+        return True
 
 
 def _scrobble() -> Scrobble:
@@ -43,6 +49,29 @@ def _configure_export(monkeypatch, tmp_path, *, registration_unix=1):
             return registration_unix
 
     monkeypatch.setattr(export_lastfm, "LastFMClient", FakeLastFMClient)
+
+
+def test_progress_reporter_throttles_live_updates_and_keeps_milestones():
+    stream = _TTYStream()
+    timestamps = iter([0.0, 1.0, 16.0])
+    reporter = export_lastfm._ProgressReporter(
+        stream=stream,
+        clock=lambda: next(timestamps),
+    )
+
+    reporter.start("Starting verified export")
+    reporter.update("Working: first")
+    reporter.update("Working: skipped")
+    reporter.update("Working: next")
+    reporter.milestone("Completed 2020 Q1")
+    reporter.finish("Completed verified export")
+
+    assert stream.getvalue() == (
+        "Starting verified export\n"
+        "\rWorking: first\rWorking: next\n"
+        "Completed 2020 Q1\n"
+        "Completed verified export\n"
+    )
 
 
 def test_export_snapshot_writes_verified_raw_scrobbles_and_metadata(
