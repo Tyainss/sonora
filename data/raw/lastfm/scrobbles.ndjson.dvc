@@ -1,0 +1,5 @@
+outs:
+- md5: 018db6bff4fd71d70166434524601819
+  size: 183151566
+  hash: md5
+  path: scrobbles.ndjson
