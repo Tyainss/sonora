@@ -16,7 +16,7 @@ def _(mo):
     mo.md(r"""
     # Clean listening events validation
 
-    Build and validate Sonora's first interim listening-events dataset from the current raw Last.fm snapshot.
+    Build and check the first cleaned listening-events dataset from the current Last.fm export.
     """)
     return
 
@@ -51,7 +51,7 @@ def _(USER_ID, mo, paths):
     - **Raw input:** `{paths.raw_lastfm_scrobbles}`
     - **Interim output:** `{paths.listening_events_clean}`
 
-    The build is explicit because it replaces the current interim Parquet with a fresh build from the raw snapshot.
+    Use the button below to rebuild the dataset from the current raw export.
     """)
     return
 
@@ -82,7 +82,7 @@ def _(USER_ID, build_button, build_listening_events_clean, mo, paths):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Contract validation
+    ## Checks
     """)
     return
 
@@ -105,7 +105,7 @@ def _(clean_events, pl, raw_scrobbles):
             "metric": [
                 "Raw events",
                 "Clean events",
-                "Rows removed by cleaned-event deduplication",
+                "Duplicate rows removed",
             ],
             "value": [
                 raw_event_count,
@@ -303,14 +303,14 @@ def _(
         {
             "check": [
                 "Expected columns and order",
-                "UTC listened_at",
+                "listened_at is UTC",
                 "Row count did not increase",
-                "No duplicate clean events",
+                "No duplicate events",
                 "Required values are present",
                 "User ID is correct",
                 "Source is correct",
-                "Timestamp range is preserved",
-                "Observed names are preserved after trimming",
+                "Timestamp range matches raw data",
+                "Names match raw data after trimming",
             ],
             "passed": [
                 _schema.names() == EXPECTED_COLUMNS,
@@ -334,9 +334,9 @@ def _(
 def _(mo, validation_results):
     _passed = validation_results.get_column("passed").all()
     if _passed:
-        mo.md("**Result:** all interim listening-event contract checks passed.")
+        mo.md("**Result:** all checks passed.")
     else:
-        mo.md("**Result:** at least one contract check failed and should be investigated before accepting the interim dataset.")
+        mo.md("**Result:** some checks failed. Review them before using the dataset.")
     return
 
 
