@@ -10,7 +10,8 @@ _WHITESPACE_PATTERN = r"\s+"
 def normalize_for_comparison(expr: pl.Expr) -> pl.Expr:
     """Normalize text for identity-matching comparisons without changing stored names."""
     return (
-        expr.str.normalize("NFKD")
+        expr.cast(pl.String)
+        .str.normalize("NFKD")
         .str.to_lowercase()
         .str.replace_all(_COMBINING_MARK_PATTERN, "")
         .str.replace_all(_APOSTROPHE_PATTERN, "'")

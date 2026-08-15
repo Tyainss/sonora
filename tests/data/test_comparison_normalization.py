@@ -46,6 +46,15 @@ def test_normalize_for_comparison_preserves_nulls_and_maps_blank_values_to_null(
     assert _normalize([None, "", "   "]) == [None, None, None]
 
 
+def test_normalize_for_comparison_handles_all_null_columns():
+    frame = pl.DataFrame({"value": pl.Series([None, None], dtype=pl.Null)})
+
+    result = frame.select(normalize_for_comparison(pl.col("value")))
+
+    assert result.to_series().to_list() == [None, None]
+    assert result.schema["value"] == pl.String
+
+
 def test_normalization_is_derived_without_overwriting_observed_values():
     frame = pl.DataFrame({"artist_name": ["Samuel Úria"]})
 
