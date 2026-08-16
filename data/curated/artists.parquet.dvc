@@ -1,0 +1,5 @@
+outs:
+- md5: 54c0d98a91868bc73ba91c43c2bd60e3
+  size: 86966
+  hash: md5
+  path: artists.parquet

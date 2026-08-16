@@ -1,0 +1,5 @@
+outs:
+- md5: 5722b4f9f968b43020410f4ee0546d8c
+  size: 87171
+  hash: md5
+  path: artist_aliases.parquet
