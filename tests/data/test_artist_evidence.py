@@ -1,10 +1,7 @@
 import polars as pl
 import pytest
 
-from sonora.data.artist_candidates import (
-    collect_artist_aliases,
-    generate_artist_candidate_pairs,
-)
+from sonora.data.artist_candidates import generate_artist_candidate_pairs
 from sonora.data.artist_evidence import (
     build_artist_candidate_evidence,
     score_artist_candidate_evidence,
@@ -48,6 +45,7 @@ def test_build_artist_candidate_evidence_combines_lexical_and_catalogue_signals(
     assert result.height == 1
     assert row["name_levenshtein_similarity"] == pytest.approx(1.0)
     assert row["name_wratio"] == pytest.approx(1.0)
+    assert "name_token_set_ratio" not in result.columns
     assert row["shared_track_count"] == 1
     assert row["track_jaccard"] == pytest.approx(0.5)
     assert row["track_containment"] == pytest.approx(1.0)
@@ -120,8 +118,7 @@ def test_artist_mbid_relation_distinguishes_shared_and_conflict():
             },
         ]
     )
-    aliases = collect_artist_aliases(events)
-    candidates = generate_artist_candidate_pairs(aliases)
+    candidates = generate_artist_candidate_pairs(events)
     scored = score_artist_candidate_evidence(events, candidates)
 
     shared = scored.filter(

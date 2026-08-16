@@ -9,7 +9,6 @@ from rapidfuzz.distance import Levenshtein
 from sonora.data.artist_candidates import (
     DEFAULT_ARTIST_CANDIDATE_CONFIG,
     ArtistCandidateConfig,
-    collect_artist_aliases,
     generate_artist_candidate_pairs,
 )
 from sonora.data.comparison_normalization import normalize_for_comparison
@@ -33,7 +32,6 @@ ArtistMbidRelation = Literal["missing", "shared", "conflict"]
 _EVIDENCE_SCHEMA = {
     "name_levenshtein_similarity": pl.Float64,
     "name_wratio": pl.Float64,
-    "name_token_set_ratio": pl.Float64,
     "left_scrobble_count": pl.UInt64,
     "right_scrobble_count": pl.UInt64,
     "left_track_count": pl.UInt64,
@@ -76,8 +74,7 @@ def build_artist_candidate_evidence(
     candidate_config: ArtistCandidateConfig = DEFAULT_ARTIST_CANDIDATE_CONFIG,
 ) -> pl.DataFrame:
     """Generate artist candidates and attach interpretable identity evidence."""
-    aliases = collect_artist_aliases(events)
-    candidates = generate_artist_candidate_pairs(aliases, config=candidate_config)
+    candidates = generate_artist_candidate_pairs(events, config=candidate_config)
     return score_artist_candidate_evidence(events, candidates)
 
 
@@ -166,11 +163,6 @@ def _score_candidate(
             right_comparison,
         ),
         "name_wratio": fuzz.WRatio(left_comparison, right_comparison) / 100.0,
-        "name_token_set_ratio": fuzz.token_set_ratio(
-            left_comparison,
-            right_comparison,
-        )
-        / 100.0,
         "left_scrobble_count": left.scrobble_count,
         "right_scrobble_count": right.scrobble_count,
         "left_track_count": len(left.tracks),

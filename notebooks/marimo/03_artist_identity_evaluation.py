@@ -16,29 +16,31 @@ def _(mo):
     mo.md(r"""
     # Artist identity evaluation
 
-    A first look at which artist pairs the matcher finds and what evidence supports them.
+    Checks which artist names are being paired and what supports each match.
     """)
     return
 
 
 @app.cell
 def _():
-    from itertools import combinations
-
     import polars as pl
 
     from sonora.data.artist_candidates import (
+        DEFAULT_ARTIST_CANDIDATE_CONFIG,
         collect_artist_aliases,
         generate_artist_candidate_pairs,
     )
     from sonora.data.artist_evidence import score_artist_candidate_evidence
+    from sonora.data.comparison_normalization import normalize_for_comparison
     from sonora.data.paths import DEFAULT_DATA_PATHS
 
     paths = DEFAULT_DATA_PATHS
+    candidate_config = DEFAULT_ARTIST_CANDIDATE_CONFIG
     return (
+        candidate_config,
         collect_artist_aliases,
-        combinations,
         generate_artist_candidate_pairs,
+        normalize_for_comparison,
         paths,
         pl,
         score_artist_candidate_evidence,
@@ -51,19 +53,11 @@ def _(mo, paths):
     mo.stop(
         not dataset_path.is_file(),
         mo.callout(
-            f"Clean listening events not found at `{dataset_path}`. Build the interim dataset first.",
+            f"Clean listening events not found at `{dataset_path}`. Build it first.",
             kind="danger",
         ),
     )
     return (dataset_path,)
-
-
-@app.cell(hide_code=True)
-def _(dataset_path, mo):
-    mo.md(f"""
-    **Input:** `{dataset_path}`
-    """)
-    return
 
 
 @app.cell
@@ -76,7 +70,7 @@ def _(
 ):
     events = pl.scan_parquet(dataset_path)
     aliases = collect_artist_aliases(events)
-    candidates = generate_artist_candidate_pairs(aliases)
+    candidates = generate_artist_candidate_pairs(events)
     evidence = score_artist_candidate_evidence(events, candidates)
     return aliases, candidates, evidence, events
 
@@ -85,8 +79,6 @@ def _(
 def _(mo):
     mo.md(r"""
     ## 1. Candidate generation
-
-    First, check how much the candidate step cuts down the number of artist pairs.
     """)
     return
 
@@ -99,59 +91,43 @@ def _(aliases, candidates, mo):
     _candidate_pct = (
         _candidate_count / _all_pair_count * 100 if _all_pair_count else 0.0
     )
-    _reduction_pct = 100 - _candidate_pct
 
     mo.md(f"""
-    - **Observed artist aliases:** {_alias_count:,}
-    - **All possible alias pairs:** {_all_pair_count:,}
-    - **Generated candidate pairs:** {_candidate_count:,}
-    - **Candidate share of all pairs:** {_candidate_pct:.3f}%
-    - **Pair reduction:** {_reduction_pct:.3f}%
+    - **Observed artist names:** {_alias_count:,}
+    - **All possible pairs:** {_all_pair_count:,}
+    - **Candidate pairs:** {_candidate_count:,}
+    - **Candidate share:** {_candidate_pct:.3f}%
     """)
     return
 
 
 @app.cell
 def _(candidates, pl):
-    _blocking_counts = candidates.select(
-        pl.col("blocking_exact_name_match").sum().alias("exact_name"),
-        (pl.col("blocking_shared_token_count") > 0).sum().alias("shared_token"),
-        (pl.col("blocking_shared_ngram_count") > 0).sum().alias("shared_ngram"),
-    ).row(0, named=True)
-
-    blocking_summary = pl.DataFrame(
+    candidate_source_summary = pl.DataFrame(
         {
-            "retrieval_signal": [
+            "source": [
                 "Same normalized name",
-                "Shared word",
-                "Shared character n-grams",
+                "Shared name word",
+                "Shared name n-grams",
+                "Shared track title",
             ],
             "candidate_pairs": [
-                _blocking_counts["exact_name"],
-                _blocking_counts["shared_token"],
-                _blocking_counts["shared_ngram"],
+                candidates.get_column("candidate_from_exact_name").sum(),
+                candidates.get_column("candidate_from_shared_token").sum(),
+                candidates.get_column("candidate_from_shared_ngrams").sum(),
+                candidates.get_column("candidate_from_shared_tracks").sum(),
             ],
         }
     )
 
-    blocking_summary
-    return (blocking_summary,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    A pair can be found by more than one signal.
-    """)
-    return
+    candidate_source_summary
+    return (candidate_source_summary,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     ## 2. Pairs from the earlier EDA
-
-    These pairs stood out earlier and give us a useful first check of what the matcher is finding.
     """)
     return
 
@@ -183,22 +159,28 @@ def _(aliases, evidence, pl):
         _row = _match.row(0, named=True) if not _match.is_empty() else None
         _rows.append(
             {
-                "reference_left": _left,
-                "reference_right": _right,
+                "artist_left": _left,
+                "artist_right": _right,
                 "left_observed": _left in _observed_names,
                 "right_observed": _right in _observed_names,
-                "retrieved_as_candidate": _row is not None,
-                "name_levenshtein_similarity": (
+                "candidate": _row is not None,
+                "from_name": (
+                    (
+                        _row["candidate_from_exact_name"]
+                        or _row["candidate_from_shared_token"]
+                        or _row["candidate_from_shared_ngrams"]
+                    )
+                    if _row
+                    else None
+                ),
+                "from_tracks": _row["candidate_from_shared_tracks"] if _row else None,
+                "levenshtein": (
                     _row["name_levenshtein_similarity"] if _row else None
                 ),
-                "name_wratio": _row["name_wratio"] if _row else None,
-                "name_token_set_ratio": _row["name_token_set_ratio"] if _row else None,
-                "shared_track_count": _row["shared_track_count"] if _row else None,
+                "wratio": _row["name_wratio"] if _row else None,
+                "shared_tracks": _row["shared_track_count"] if _row else None,
                 "track_containment": _row["track_containment"] if _row else None,
-                "shared_track_mbid_count": (
-                    _row["shared_track_mbid_count"] if _row else None
-                ),
-                "shared_album_count": _row["shared_album_count"] if _row else None,
+                "shared_albums": _row["shared_album_count"] if _row else None,
                 "album_containment": _row["album_containment"] if _row else None,
                 "artist_mbid_relation": (
                     _row["artist_mbid_relation"] if _row else None
@@ -214,107 +196,87 @@ def _(aliases, evidence, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 3. Shared artist MBIDs
-
-    If two aliases share an artist MBID, we would expect the candidate step to find them. This shows how often that happens.
+    `Miguel Luz` / `Mike Lyte` is a rename case, so track overlap is more useful than the name itself.
     """)
     return
-
-
-@app.cell
-def _(candidates, combinations, events, pl):
-    _mbid_aliases = (
-        events.filter(pl.col("artist_mbid").is_not_null())
-        .group_by("artist_mbid")
-        .agg(pl.col("artist_name").unique().sort().alias("artist_aliases"))
-        .filter(pl.col("artist_aliases").list.len() > 1)
-        .collect()
-    )
-
-    _candidate_pair_keys = {
-        frozenset((_left, _right))
-        for _left, _right in candidates.select(
-            "observed_artist_name_left",
-            "observed_artist_name_right",
-        ).iter_rows()
-    }
-    _mbid_pair_keys = {
-        frozenset((_left, _right))
-        for _aliases in _mbid_aliases.get_column("artist_aliases").to_list()
-        for _left, _right in combinations(_aliases, 2)
-    }
-    _retrieved_mbid_pairs = _mbid_pair_keys & _candidate_pair_keys
-    _mbid_recall = (
-        len(_retrieved_mbid_pairs) / len(_mbid_pair_keys)
-        if _mbid_pair_keys
-        else None
-    )
-
-    mbid_candidate_recall = pl.DataFrame(
-        {
-            "metric": [
-                "Artist MBIDs used by multiple names",
-                "Name pairs sharing an artist MBID",
-                "Shared-MBID pairs found as candidates",
-                "Shared-MBID recall",
-            ],
-            "value": [
-                str(_mbid_aliases.height),
-                str(len(_mbid_pair_keys)),
-                str(len(_retrieved_mbid_pairs)),
-                f"{_mbid_recall:.1%}" if _mbid_recall is not None else "n/a",
-            ],
-        }
-    )
-
-    mbid_candidate_recall
-    return (mbid_candidate_recall,)
-
-
-@app.cell
-def _(candidates, combinations, events, pl):
-    _mbid_aliases = (
-        events.filter(pl.col("artist_mbid").is_not_null())
-        .group_by("artist_mbid")
-        .agg(pl.col("artist_name").unique().sort().alias("artist_aliases"))
-        .filter(pl.col("artist_aliases").list.len() > 1)
-        .collect()
-    )
-    _candidate_pair_keys = {
-        frozenset((_left, _right))
-        for _left, _right in candidates.select(
-            "observed_artist_name_left",
-            "observed_artist_name_right",
-        ).iter_rows()
-    }
-    _missed_rows = []
-    for _artist_mbid, _aliases in _mbid_aliases.iter_rows():
-        for _left, _right in combinations(_aliases, 2):
-            if frozenset((_left, _right)) not in _candidate_pair_keys:
-                _missed_rows.append(
-                    {
-                        "artist_mbid": _artist_mbid,
-                        "observed_artist_name_left": _left,
-                        "observed_artist_name_right": _right,
-                    }
-                )
-
-    missed_shared_mbid_pairs = pl.DataFrame(
-        _missed_rows,
-        schema={
-            "artist_mbid": pl.String,
-            "observed_artist_name_left": pl.String,
-            "observed_artist_name_right": pl.String,
-        },
-    )
-    missed_shared_mbid_pairs.head(30)
-    return (missed_shared_mbid_pairs,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    If useful pairs are missing here, adding artist MBIDs as another candidate source may be better than making fuzzy matching broader.
+    ## 3. Shared track titles
+    """)
+    return
+
+
+@app.cell
+def _(candidate_config, events, normalize_for_comparison, pl):
+    shared_track_titles = (
+        events.select(
+            normalize_for_comparison(pl.col("track_name")).alias("track_name"),
+            pl.col("artist_name"),
+        )
+        .drop_nulls("track_name")
+        .unique()
+        .group_by("track_name")
+        .agg(pl.col("artist_name").n_unique().alias("artist_count"))
+        .filter(pl.col("artist_count") > 1)
+        .with_columns(
+            (pl.col("artist_count") <= candidate_config.max_track_block_size).alias(
+                "used_for_candidates"
+            )
+        )
+        .sort("artist_count", descending=True)
+        .collect()
+    )
+
+    shared_track_titles.head(30)
+    return (shared_track_titles,)
+
+
+@app.cell(hide_code=True)
+def _(candidate_config, mo):
+    mo.md(f"""
+    Very common titles are noisy, so tracks used by more than **{candidate_config.max_track_block_size} artists** are ignored here.
+    """)
+    return
+
+
+@app.cell
+def _(evidence, pl):
+    catalogue_only_candidates = (
+        evidence.filter(
+            pl.col("candidate_from_shared_tracks")
+            & ~pl.col("candidate_from_exact_name")
+            & ~pl.col("candidate_from_shared_token")
+            & ~pl.col("candidate_from_shared_ngrams")
+        )
+        .sort(
+            ["shared_track_count", "track_containment"],
+            descending=True,
+            nulls_last=True,
+        )
+        .select(
+            "observed_artist_name_left",
+            "observed_artist_name_right",
+            "name_levenshtein_similarity",
+            "name_wratio",
+            "shared_track_count",
+            "track_containment",
+            "shared_album_count",
+            "album_containment",
+            "artist_mbid_relation",
+        )
+    )
+
+    catalogue_only_candidates.head(40)
+    return (catalogue_only_candidates,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Track matching now finds the `Miguel Luz` / `Mike Lyte` rename that name matching misses. Most of the other strong track-only pairs are collaborations or closely related artists, such as `El-P` / `Run the Jewels`, `Kenny Segal` / `Milo`, `Kanye West` / `¥$`, and `Adrianne Lenker` / `Big Thief`. Shared tracks are useful for recall, but they are not enough to merge artists on their own.
     """)
     return
 
@@ -323,8 +285,6 @@ def _(mo):
 def _(mo):
     mo.md(r"""
     ## 4. Evidence ranges
-
-    These ranges give us a feel for the signals before we choose any thresholds.
     """)
     return
 
@@ -334,7 +294,6 @@ def _(evidence, pl):
     _metrics = [
         "name_levenshtein_similarity",
         "name_wratio",
-        "name_token_set_ratio",
         "shared_track_count",
         "track_containment",
         "shared_track_mbid_count",
@@ -377,9 +336,15 @@ def _(evidence, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 5. Pairs sharing tracks, albums, or IDs
+    No observed artist names share an artist MBID in this dataset, so MBIDs do not add candidate recall here. Conflicts are still useful evidence against a merge.
+    """)
+    return
 
-    These pairs share tracks, albums, or IDs, so they are useful beyond simple name similarity.
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 5. Catalogue-supported pairs
     """)
     return
 
@@ -427,9 +392,15 @@ def _(evidence, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 6. Similar names without catalogue support
+    The strongest rows mostly line up with the aliases we already identified, including the `Samuel Úria`, `King Gizzard`, `Conjunto Corona`, `Luísa Sobral`, `Conan Osiris`, `JAY-Z`, and `Ichiko Aoba` variants. `El-P` / `Run the Jewels` is a useful edge case because Last.fm credits can blur a real solo artist with a group he belongs to. `Aphex Twin` / `Soul Glo` shows that catalogue overlap can also be accidental.
+    """)
+    return
 
-    These pairs show where similar names may be misleading on their own.
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 6. Similar names without catalogue support
     """)
     return
 
@@ -452,11 +423,10 @@ def _(evidence, pl):
             "observed_artist_name_right",
             "name_levenshtein_similarity",
             "name_wratio",
-            "name_token_set_ratio",
             "artist_mbid_relation",
-            "blocking_exact_name_match",
-            "blocking_shared_token_count",
-            "blocking_shared_ngram_count",
+            "candidate_from_exact_name",
+            "candidate_from_shared_token",
+            "candidate_from_shared_ngrams",
         )
     )
 
@@ -467,9 +437,15 @@ def _(evidence, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 7. Artist MBID conflicts
+    Some real matches have no catalogue overlap at all. The current examples include `JAY-Z`, `The Legendary Tigerman`, `Chet Baker`, and `Miles Davis` variants. Name evidence therefore still needs to stand on its own for some aliases.
+    """)
+    return
 
-    These are worth checking when the names or catalogues otherwise look similar.
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 7. Artist MBID conflicts
     """)
     return
 
@@ -490,7 +466,6 @@ def _(evidence, pl):
             "name_wratio",
             "shared_track_count",
             "track_containment",
-            "shared_track_mbid_count",
             "shared_album_count",
             "album_containment",
         )
@@ -503,59 +478,58 @@ def _(evidence, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 8. Fuzzy metric differences
+    Most strong MBID conflicts are different artists. `Conjunto Corona` / `Corona` is the important exception here: the catalogue evidence is strong enough that an MBID conflict should count against a merge without automatically ruling it out.
+    """)
+    return
 
-    These are the pairs where the fuzzy metrics disagree most. They should help us see whether one metric behaves better for this data.
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 8. Levenshtein vs WRatio
     """)
     return
 
 
 @app.cell
 def _(evidence, pl):
-    fuzzy_metric_disagreement = (
+    fuzzy_metric_difference = (
         evidence.with_columns(
             (pl.col("name_wratio") - pl.col("name_levenshtein_similarity"))
             .abs()
-            .alias("wratio_vs_levenshtein_gap"),
-            (pl.col("name_token_set_ratio") - pl.col("name_levenshtein_similarity"))
-            .abs()
-            .alias("token_set_vs_levenshtein_gap"),
+            .alias("metric_gap")
         )
-        .with_columns(
-            pl.max_horizontal(
-                "wratio_vs_levenshtein_gap",
-                "token_set_vs_levenshtein_gap",
-            ).alias("largest_metric_gap")
-        )
-        .sort("largest_metric_gap", descending=True)
+        .sort("metric_gap", descending=True)
         .select(
             "observed_artist_name_left",
             "observed_artist_name_right",
             "name_levenshtein_similarity",
             "name_wratio",
-            "name_token_set_ratio",
-            "largest_metric_gap",
+            "metric_gap",
             "shared_track_count",
             "track_containment",
             "artist_mbid_relation",
         )
     )
 
-    fuzzy_metric_disagreement.head(40)
-    return (fuzzy_metric_disagreement,)
+    fuzzy_metric_difference.head(40)
+    return (fuzzy_metric_difference,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## What to look at next
+    Levenshtein is useful for small spelling changes. WRatio also handles cases where words move around or one name contains another. We keep both. Token-set ratio was dropped after the first run because it gave perfect scores to many obvious subset matches.
+    """)
+    return
 
-    - Are we finding the pairs we expect?
-    - Are we creating too many obvious false positives?
-    - Are shared-MBID pairs being missed?
-    - Do the fuzzy metrics behave differently enough to matter?
 
-    We will use these results later to choose thresholds and test track/album suffix handling.
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Current direction
+
+    Name matching handles most spelling and formatting variants. Track matching adds useful recall for cases such as `Miguel Luz` / `Mike Lyte`, but it also picks up collaborations and related artists, so catalogue overlap needs other evidence before a merge. Levenshtein and WRatio both add useful information, while artist MBIDs are mainly negative evidence in this dataset.
     """)
     return
 

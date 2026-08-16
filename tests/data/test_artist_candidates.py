@@ -8,14 +8,13 @@ from sonora.data.artist_candidates import (
 )
 
 
-def _aliases(*names: str) -> pl.DataFrame:
-    events = pl.DataFrame(
+def _events(*rows: tuple[str, str]) -> pl.LazyFrame:
+    return pl.DataFrame(
         {
-            "user_id": ["user-1"] * len(names),
-            "artist_name": list(names),
+            "artist_name": [artist for artist, _ in rows],
+            "track_name": [track for _, track in rows],
         }
     ).lazy()
-    return collect_artist_aliases(events)
 
 
 def _candidate_names(candidates: pl.DataFrame) -> set[frozenset[str]]:
@@ -61,14 +60,14 @@ def test_collect_artist_aliases_is_global_and_preserves_observed_names():
 
 
 def test_generate_candidates_includes_exact_normalized_variants():
-    aliases = _aliases(
-        "Samuel Uria",
-        "Samuel Úria",
-        "King Gizzard & The Lizard Wizard",
-        "King Gizzard And The Lizard Wizard",
+    events = _events(
+        ("Samuel Uria", "Song A"),
+        ("Samuel Úria", "Song B"),
+        ("King Gizzard & The Lizard Wizard", "Song C"),
+        ("King Gizzard And The Lizard Wizard", "Song D"),
     )
 
-    candidates = generate_artist_candidate_pairs(aliases)
+    candidates = generate_artist_candidate_pairs(events)
     candidate_names = _candidate_names(candidates)
 
     assert frozenset(("Samuel Uria", "Samuel Úria")) in candidate_names
@@ -82,64 +81,102 @@ def test_generate_candidates_includes_exact_normalized_variants():
         in candidate_names
     )
     samuel = _candidate_row(candidates, "Samuel Uria", "Samuel Úria")
-    assert samuel["blocking_exact_name_match"] is True
+    assert samuel["candidate_from_exact_name"] is True
 
 
 def test_generate_candidates_includes_token_containment_variants():
-    aliases = _aliases("Corona", "Conjunto Corona", "Nirvana")
+    events = _events(
+        ("Corona", "Song A"),
+        ("Conjunto Corona", "Song B"),
+        ("Nirvana", "Song C"),
+    )
 
-    candidates = generate_artist_candidate_pairs(aliases)
+    candidates = generate_artist_candidate_pairs(events)
 
     assert _candidate_names(candidates) == {frozenset(("Corona", "Conjunto Corona"))}
     corona = _candidate_row(candidates, "Corona", "Conjunto Corona")
+    assert corona["candidate_from_shared_token"] is True
     assert corona["blocking_shared_token_count"] == 1
 
 
 def test_generate_candidates_includes_small_spelling_variants_via_ngrams():
-    aliases = _aliases("Weeknd", "Weekend", "Nirvana")
+    events = _events(
+        ("Weeknd", "Song A"),
+        ("Weekend", "Song B"),
+        ("Nirvana", "Song C"),
+    )
 
-    candidates = generate_artist_candidate_pairs(aliases)
+    candidates = generate_artist_candidate_pairs(events)
     candidate_names = _candidate_names(candidates)
 
     assert frozenset(("Weeknd", "Weekend")) in candidate_names
     assert all("Nirvana" not in pair for pair in candidate_names)
     weeknd = _candidate_row(candidates, "Weeknd", "Weekend")
+    assert weeknd["candidate_from_shared_ngrams"] is True
     assert weeknd["blocking_shared_ngram_count"] >= 2
 
 
+def test_generate_candidates_includes_shared_track_variants_with_unrelated_names():
+    events = _events(
+        ("Miguel Luz", "Same Song"),
+        ("Mike Lyte", "Same Song"),
+        ("Nirvana", "Different Song"),
+    )
+
+    candidates = generate_artist_candidate_pairs(events)
+
+    assert _candidate_names(candidates) == {frozenset(("Miguel Luz", "Mike Lyte"))}
+    renamed = _candidate_row(candidates, "Miguel Luz", "Mike Lyte")
+    assert renamed["candidate_from_shared_tracks"] is True
+    assert renamed["candidate_from_exact_name"] is False
+    assert renamed["candidate_from_shared_token"] is False
+    assert renamed["candidate_from_shared_ngrams"] is False
+    assert renamed["blocking_shared_track_count"] == 1
+
+
+def test_common_track_blocks_do_not_add_track_candidates():
+    events = _events(
+        ("Artist A", "Intro"),
+        ("Artist B", "Intro"),
+        ("Artist C", "Intro"),
+    )
+    config = ArtistCandidateConfig(max_track_block_size=2)
+
+    candidates = generate_artist_candidate_pairs(events, config=config)
+
+    assert not candidates.get_column("candidate_from_shared_tracks").any()
+    assert candidates.get_column("blocking_shared_track_count").sum() == 0
+
+
 def test_generate_candidates_does_not_fall_back_to_all_vs_all():
-    aliases = _aliases("Björk", "Aphex Twin", "Nirvana", "Outkast")
+    events = _events(
+        ("Björk", "Song A"),
+        ("Aphex Twin", "Song B"),
+        ("Nirvana", "Song C"),
+        ("Outkast", "Song D"),
+    )
 
-    candidates = generate_artist_candidate_pairs(aliases)
+    candidates = generate_artist_candidate_pairs(events)
 
     assert candidates.is_empty()
 
 
-def test_large_common_blocks_are_skipped():
-    aliases = _aliases(
-        "Collective Alpha",
-        "Collective Bravo",
-        "Collective Charlie",
+def test_large_common_name_blocks_are_skipped():
+    events = _events(
+        ("Collective Alpha", "Song A"),
+        ("Collective Bravo", "Song B"),
+        ("Collective Charlie", "Song C"),
     )
-    config = ArtistCandidateConfig(max_block_size=2)
+    config = ArtistCandidateConfig(max_name_block_size=2)
 
-    candidates = generate_artist_candidate_pairs(aliases, config=config)
+    candidates = generate_artist_candidate_pairs(events, config=config)
 
     assert candidates.is_empty()
-
-
-def test_generate_candidates_rejects_duplicate_alias_rows():
-    aliases = pl.DataFrame(
-        {
-            "observed_artist_name": ["Artist", "Artist"],
-            "artist_name_comparison": ["artist", "artist"],
-        }
-    )
-
-    with pytest.raises(ValueError, match="unique observed artist names"):
-        generate_artist_candidate_pairs(aliases)
 
 
 def test_candidate_config_rejects_invalid_blocking_settings():
     with pytest.raises(ValueError, match="ngram_size"):
         ArtistCandidateConfig(ngram_size=1)
+
+    with pytest.raises(ValueError, match="max_track_block_size"):
+        ArtistCandidateConfig(max_track_block_size=1)

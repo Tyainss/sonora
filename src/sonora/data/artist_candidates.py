@@ -6,7 +6,8 @@ import polars as pl
 
 from sonora.data.comparison_normalization import normalize_for_comparison
 
-_REQUIRED_EVENT_COLUMNS = {"artist_name"}
+_REQUIRED_ALIAS_EVENT_COLUMNS = {"artist_name"}
+_REQUIRED_CANDIDATE_EVENT_COLUMNS = {"artist_name", "track_name"}
 _REQUIRED_ALIAS_COLUMNS = {"observed_artist_name", "artist_name_comparison"}
 _BLOCK_STOPWORDS = frozenset({"and", "the"})
 _MIN_NGRAM_SIZE = 2
@@ -20,7 +21,8 @@ class ArtistCandidateConfig:
     ngram_size: int = 3
     min_shared_ngrams: int = 2
     min_token_length: int = 3
-    max_block_size: int = 100
+    max_name_block_size: int = 100
+    max_track_block_size: int = 20
 
     def __post_init__(self) -> None:
         if self.ngram_size < _MIN_NGRAM_SIZE:
@@ -29,8 +31,10 @@ class ArtistCandidateConfig:
             raise ValueError("min_shared_ngrams must be at least 1")
         if self.min_token_length < 1:
             raise ValueError("min_token_length must be at least 1")
-        if self.max_block_size < _MIN_BLOCK_SIZE:
-            raise ValueError("max_block_size must be at least 2")
+        if self.max_name_block_size < _MIN_BLOCK_SIZE:
+            raise ValueError("max_name_block_size must be at least 2")
+        if self.max_track_block_size < _MIN_BLOCK_SIZE:
+            raise ValueError("max_track_block_size must be at least 2")
 
 
 DEFAULT_ARTIST_CANDIDATE_CONFIG = ArtistCandidateConfig()
@@ -38,7 +42,7 @@ DEFAULT_ARTIST_CANDIDATE_CONFIG = ArtistCandidateConfig()
 
 def collect_artist_aliases(events: pl.LazyFrame) -> pl.DataFrame:
     """Collect distinct observed artist names with derived comparison names."""
-    _validate_event_schema(events)
+    _validate_event_schema(events, required=_REQUIRED_ALIAS_EVENT_COLUMNS)
 
     aliases = (
         events.select(pl.col("artist_name").alias("observed_artist_name"))
@@ -56,11 +60,14 @@ def collect_artist_aliases(events: pl.LazyFrame) -> pl.DataFrame:
 
 
 def generate_artist_candidate_pairs(
-    aliases: pl.DataFrame,
+    events: pl.LazyFrame,
     *,
     config: ArtistCandidateConfig = DEFAULT_ARTIST_CANDIDATE_CONFIG,
 ) -> pl.DataFrame:
     """Generate plausible artist-alias pairs without all-vs-all comparison."""
+    _validate_event_schema(events, required=_REQUIRED_CANDIDATE_EVENT_COLUMNS)
+
+    aliases = collect_artist_aliases(events)
     _validate_alias_schema(aliases)
     _validate_alias_values(aliases)
 
@@ -68,6 +75,9 @@ def generate_artist_candidate_pairs(
         "observed_artist_name"
     )
     records = list(aliases.iter_rows(named=True))
+    artist_index = {
+        record["observed_artist_name"]: index for index, record in enumerate(records)
+    }
 
     exact_blocks: dict[str, list[int]] = defaultdict(list)
     token_blocks: dict[str, list[int]] = defaultdict(list)
@@ -90,35 +100,47 @@ def generate_artist_candidate_pairs(
     _count_capped_block_pairs(
         token_blocks.values(),
         shared_token_counts,
-        max_block_size=config.max_block_size,
+        max_block_size=config.max_name_block_size,
     )
 
     shared_ngram_counts: Counter[tuple[int, int]] = Counter()
     _count_capped_block_pairs(
         ngram_blocks.values(),
         shared_ngram_counts,
-        max_block_size=config.max_block_size,
+        max_block_size=config.max_name_block_size,
     )
-
     ngram_pairs = {
         pair
         for pair, shared_count in shared_ngram_counts.items()
         if shared_count >= config.min_shared_ngrams
     }
-    candidate_pairs = exact_pairs | set(shared_token_counts) | ngram_pairs
+
+    shared_track_counts = _shared_track_pair_counts(
+        events,
+        artist_index=artist_index,
+        max_block_size=config.max_track_block_size,
+    )
+    track_pairs = set(shared_track_counts)
+
+    token_pairs = set(shared_token_counts)
+    candidate_pairs = exact_pairs | token_pairs | ngram_pairs | track_pairs
 
     return _candidate_frame(
         records,
         candidate_pairs,
         exact_pairs=exact_pairs,
+        token_pairs=token_pairs,
+        ngram_pairs=ngram_pairs,
+        track_pairs=track_pairs,
         shared_token_counts=shared_token_counts,
         shared_ngram_counts=shared_ngram_counts,
+        shared_track_counts=shared_track_counts,
     )
 
 
-def _validate_event_schema(events: pl.LazyFrame) -> None:
+def _validate_event_schema(events: pl.LazyFrame, *, required: set[str]) -> None:
     columns = set(events.collect_schema().names())
-    missing = sorted(_REQUIRED_EVENT_COLUMNS - columns)
+    missing = sorted(required - columns)
     if missing:
         raise ValueError(f"Listening events are missing required columns: {missing}")
 
@@ -172,6 +194,35 @@ def _character_ngrams(value: str, *, size: int) -> set[str]:
     return {padded[index : index + size] for index in range(len(padded) - size + 1)}
 
 
+def _shared_track_pair_counts(
+    events: pl.LazyFrame,
+    *,
+    artist_index: dict[str, int],
+    max_block_size: int,
+) -> Counter[tuple[int, int]]:
+    artist_tracks = (
+        events.select(
+            pl.col("artist_name"),
+            normalize_for_comparison(pl.col("track_name")).alias("track_comparison"),
+        )
+        .drop_nulls("track_comparison")
+        .unique()
+        .collect()
+    )
+
+    track_blocks: dict[str, list[int]] = defaultdict(list)
+    for artist_name, track_comparison in artist_tracks.iter_rows():
+        track_blocks[track_comparison].append(artist_index[artist_name])
+
+    pair_counts: Counter[tuple[int, int]] = Counter()
+    _count_capped_block_pairs(
+        track_blocks.values(),
+        pair_counts,
+        max_block_size=max_block_size,
+    )
+    return pair_counts
+
+
 def _add_block_pairs(
     blocks,
     candidate_pairs: set[tuple[int, int]],
@@ -199,8 +250,12 @@ def _candidate_frame(
     candidate_pairs: set[tuple[int, int]],
     *,
     exact_pairs: set[tuple[int, int]],
+    token_pairs: set[tuple[int, int]],
+    ngram_pairs: set[tuple[int, int]],
+    track_pairs: set[tuple[int, int]],
     shared_token_counts: Counter[tuple[int, int]],
     shared_ngram_counts: Counter[tuple[int, int]],
+    shared_track_counts: Counter[tuple[int, int]],
 ) -> pl.DataFrame:
     ordered_pairs = sorted(
         candidate_pairs,
@@ -231,17 +286,26 @@ def _candidate_frame(
                 ],
                 dtype=pl.String,
             ),
-            "blocking_exact_name_match": pl.Series(
-                [pair in exact_pairs for pair in ordered_pairs],
-                dtype=pl.Boolean,
+            "candidate_from_exact_name": pl.Series(
+                [pair in exact_pairs for pair in ordered_pairs], dtype=pl.Boolean
+            ),
+            "candidate_from_shared_token": pl.Series(
+                [pair in token_pairs for pair in ordered_pairs], dtype=pl.Boolean
+            ),
+            "candidate_from_shared_ngrams": pl.Series(
+                [pair in ngram_pairs for pair in ordered_pairs], dtype=pl.Boolean
+            ),
+            "candidate_from_shared_tracks": pl.Series(
+                [pair in track_pairs for pair in ordered_pairs], dtype=pl.Boolean
             ),
             "blocking_shared_token_count": pl.Series(
-                [shared_token_counts[pair] for pair in ordered_pairs],
-                dtype=pl.UInt32,
+                [shared_token_counts[pair] for pair in ordered_pairs], dtype=pl.UInt32
             ),
             "blocking_shared_ngram_count": pl.Series(
-                [shared_ngram_counts[pair] for pair in ordered_pairs],
-                dtype=pl.UInt32,
+                [shared_ngram_counts[pair] for pair in ordered_pairs], dtype=pl.UInt32
+            ),
+            "blocking_shared_track_count": pl.Series(
+                [shared_track_counts[pair] for pair in ordered_pairs], dtype=pl.UInt32
             ),
         }
     )
