@@ -63,6 +63,7 @@ def generate_artist_candidate_pairs(
     events: pl.LazyFrame,
     *,
     config: ArtistCandidateConfig = DEFAULT_ARTIST_CANDIDATE_CONFIG,
+    focus_artist_names: set[str] | None = None,
 ) -> pl.DataFrame:
     """Generate plausible artist-alias pairs without all-vs-all comparison."""
     _validate_event_schema(events, required=_REQUIRED_CANDIDATE_EVENT_COLUMNS)
@@ -124,6 +125,11 @@ def generate_artist_candidate_pairs(
 
     token_pairs = set(shared_token_counts)
     candidate_pairs = exact_pairs | token_pairs | ngram_pairs | track_pairs
+    candidate_pairs = _filter_candidate_pairs(
+        candidate_pairs,
+        artist_index=artist_index,
+        focus_artist_names=focus_artist_names,
+    )
 
     return _candidate_frame(
         records,
@@ -136,6 +142,29 @@ def generate_artist_candidate_pairs(
         shared_ngram_counts=shared_ngram_counts,
         shared_track_counts=shared_track_counts,
     )
+
+
+def _filter_candidate_pairs(
+    candidate_pairs: set[tuple[int, int]],
+    *,
+    artist_index: dict[str, int],
+    focus_artist_names: set[str] | None,
+) -> set[tuple[int, int]]:
+    if focus_artist_names is None:
+        return candidate_pairs
+
+    unknown_names = sorted(focus_artist_names - set(artist_index))
+    if unknown_names:
+        raise ValueError(
+            f"Focus artists are absent from listening events: {unknown_names}"
+        )
+
+    focus_indices = {artist_index[name] for name in focus_artist_names}
+    return {
+        pair
+        for pair in candidate_pairs
+        if pair[0] in focus_indices or pair[1] in focus_indices
+    }
 
 
 def _validate_event_schema(events: pl.LazyFrame, *, required: set[str]) -> None:

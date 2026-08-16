@@ -72,9 +72,14 @@ def build_artist_candidate_evidence(
     events: pl.LazyFrame,
     *,
     candidate_config: ArtistCandidateConfig = DEFAULT_ARTIST_CANDIDATE_CONFIG,
+    focus_artist_names: set[str] | None = None,
 ) -> pl.DataFrame:
     """Generate artist candidates and attach interpretable identity evidence."""
-    candidates = generate_artist_candidate_pairs(events, config=candidate_config)
+    candidates = generate_artist_candidate_pairs(
+        events,
+        config=candidate_config,
+        focus_artist_names=focus_artist_names,
+    )
     return score_artist_candidate_evidence(events, candidates)
 
 

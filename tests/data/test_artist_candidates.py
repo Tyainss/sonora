@@ -174,6 +174,22 @@ def test_large_common_name_blocks_are_skipped():
     assert candidates.is_empty()
 
 
+def test_candidate_generation_can_focus_on_new_aliases():
+    events = _events(
+        ("Samuel Uria", "Song A"),
+        ("Samuel Úria", "Song B"),
+        ("Miguel Luz", "Same Song"),
+        ("Mike Lyte", "Same Song"),
+    )
+
+    candidates = generate_artist_candidate_pairs(
+        events,
+        focus_artist_names={"Mike Lyte"},
+    )
+
+    assert _candidate_names(candidates) == {frozenset(("Miguel Luz", "Mike Lyte"))}
+
+
 def test_candidate_config_rejects_invalid_blocking_settings():
     with pytest.raises(ValueError, match="ngram_size"):
         ArtistCandidateConfig(ngram_size=1)

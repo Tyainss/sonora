@@ -31,18 +31,29 @@ def _():
         generate_artist_candidate_pairs,
     )
     from sonora.data.artist_evidence import score_artist_candidate_evidence
+    from sonora.data.artist_resolution import (
+        DEFAULT_ARTIST_RESOLUTION_CONFIG,
+        cluster_artist_aliases,
+        decide_artist_identity,
+    )
     from sonora.data.comparison_normalization import normalize_for_comparison
+    from sonora.data.curate_artists import build_curated_artist_tables
     from sonora.data.paths import DEFAULT_DATA_PATHS
 
     paths = DEFAULT_DATA_PATHS
     candidate_config = DEFAULT_ARTIST_CANDIDATE_CONFIG
+    resolution_config = DEFAULT_ARTIST_RESOLUTION_CONFIG
     return (
+        build_curated_artist_tables,
         candidate_config,
+        cluster_artist_aliases,
         collect_artist_aliases,
+        decide_artist_identity,
         generate_artist_candidate_pairs,
         normalize_for_comparison,
         paths,
         pl,
+        resolution_config,
         score_artist_candidate_evidence,
     )
 
@@ -530,6 +541,224 @@ def _(mo):
     ## Current direction
 
     Name matching handles most spelling and formatting variants. Track matching adds useful recall for cases such as `Miguel Luz` / `Mike Lyte`, but it also picks up collaborations and related artists, so catalogue overlap needs other evidence before a merge. Levenshtein and WRatio both add useful information, while artist MBIDs are mainly negative evidence in this dataset.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 9. Provisional identity decisions
+    """)
+    return
+
+
+@app.cell
+def _(pl, resolution_config):
+    resolution_settings = pl.DataFrame(
+        {
+            "setting": [
+                "Near-exact Levenshtein",
+                "Near-exact WRatio",
+                "Name + catalogue WRatio",
+                "Name + catalogue shared tracks",
+                "Name + catalogue containment",
+                "MBID conflict override WRatio",
+                "MBID conflict override shared tracks",
+                "MBID conflict override containment",
+                "Possible-match Levenshtein",
+                "Possible-match WRatio",
+                "Possible-match shared tracks",
+                "Possible-match containment",
+            ],
+            "value": [
+                resolution_config.near_exact_levenshtein,
+                resolution_config.near_exact_wratio,
+                resolution_config.name_catalogue_wratio,
+                resolution_config.name_catalogue_min_shared_tracks,
+                resolution_config.name_catalogue_min_track_containment,
+                resolution_config.conflict_override_wratio,
+                resolution_config.conflict_override_min_shared_tracks,
+                resolution_config.conflict_override_min_track_containment,
+                resolution_config.possible_name_levenshtein,
+                resolution_config.possible_name_wratio,
+                resolution_config.possible_catalogue_min_shared_tracks,
+                resolution_config.possible_catalogue_min_track_containment,
+            ],
+        }
+    )
+    resolution_settings
+    return (resolution_settings,)
+
+
+@app.cell
+def _(decide_artist_identity, evidence, resolution_config):
+    decisions = decide_artist_identity(evidence, config=resolution_config)
+    return (decisions,)
+
+
+@app.cell
+def _(decisions, pl):
+    decision_summary = (
+        decisions.group_by("identity_decision", "decision_rule")
+        .agg(pl.len().alias("pairs"))
+        .sort(["identity_decision", "pairs"], descending=[False, True])
+    )
+    decision_summary
+    return (decision_summary,)
+
+
+@app.cell
+def _(decisions, pl):
+    merge_pairs = (
+        decisions.filter(pl.col("identity_decision") == "merge")
+        .sort(
+            ["decision_rule", "name_wratio", "track_containment"],
+            descending=[False, True, True],
+            nulls_last=True,
+        )
+        .select(
+            "observed_artist_name_left",
+            "observed_artist_name_right",
+            "decision_rule",
+            "name_levenshtein_similarity",
+            "name_wratio",
+            "shared_track_count",
+            "track_containment",
+            "shared_album_count",
+            "artist_mbid_relation",
+        )
+    )
+    merge_pairs.head(60)
+    return (merge_pairs,)
+
+
+@app.cell
+def _(decisions, pl):
+    possible_matches = (
+        decisions.filter(pl.col("identity_decision") == "possible_match")
+        .sort(
+            ["name_wratio", "track_containment", "shared_track_count"],
+            descending=True,
+            nulls_last=True,
+        )
+        .select(
+            "observed_artist_name_left",
+            "observed_artist_name_right",
+            "decision_rule",
+            "name_levenshtein_similarity",
+            "name_wratio",
+            "shared_track_count",
+            "track_containment",
+            "shared_album_count",
+            "artist_mbid_relation",
+        )
+    )
+    possible_matches.head(60)
+    return (possible_matches,)
+
+
+@app.cell
+def _(decisions, pl, reference_pair_summary):
+    _rows = []
+    for _reference in reference_pair_summary.iter_rows(named=True):
+        _left = _reference["artist_left"]
+        _right = _reference["artist_right"]
+        _match = decisions.filter(
+            (
+                (pl.col("observed_artist_name_left") == _left)
+                & (pl.col("observed_artist_name_right") == _right)
+            )
+            | (
+                (pl.col("observed_artist_name_left") == _right)
+                & (pl.col("observed_artist_name_right") == _left)
+            )
+        )
+        _row = _match.row(0, named=True) if not _match.is_empty() else None
+        _rows.append(
+            {
+                "artist_left": _left,
+                "artist_right": _right,
+                "decision": _row["identity_decision"] if _row else None,
+                "rule": _row["decision_rule"] if _row else None,
+            }
+        )
+
+    reference_pair_decisions = pl.DataFrame(_rows)
+    reference_pair_decisions
+    return (reference_pair_decisions,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 10. Artist clusters
+    """)
+    return
+
+
+@app.cell
+def _(aliases, cluster_artist_aliases, decisions, events, paths, pl, resolution_config):
+    existing_aliases = (
+        pl.read_parquet(paths.curated_artist_aliases)
+        if paths.curated_artist_aliases.is_file()
+        else None
+    )
+    clusters, blocked_merges = cluster_artist_aliases(
+        events,
+        aliases.select("observed_artist_name"),
+        decisions,
+        config=resolution_config,
+        existing_aliases=existing_aliases,
+    )
+    return blocked_merges, clusters, existing_aliases
+
+
+@app.cell
+def _(clusters, pl):
+    multi_alias_clusters = (
+        clusters.group_by("cluster_key")
+        .agg(
+            pl.col("observed_artist_name").sort().alias("artist_names"),
+            pl.len().alias("alias_count"),
+            pl.col("existing_artist_id").drop_nulls().first().alias("artist_id"),
+        )
+        .filter(pl.col("alias_count") > 1)
+        .sort(["alias_count", "cluster_key"], descending=[True, False])
+    )
+    multi_alias_clusters
+    return (multi_alias_clusters,)
+
+
+@app.cell
+def _(blocked_merges):
+    blocked_merges
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 11. Build artist tables
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    build_artist_tables = mo.ui.run_button(label="Build artist tables")
+    build_artist_tables
+    return (build_artist_tables,)
+
+
+@app.cell
+def _(build_artist_tables, build_curated_artist_tables, mo, paths):
+    if not build_artist_tables.value:
+        return
+
+    _build = build_curated_artist_tables(paths=paths)
+    mo.md(f"""
+    **Artists:** {_build.artists.height:,}  \n    **Aliases:** {_build.artist_aliases.height:,}
     """)
     return
 

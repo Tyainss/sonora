@@ -32,5 +32,13 @@ class DataPaths:
     def curated_dir(self) -> Path:
         return self.data_dir / "curated"
 
+    @property
+    def curated_artists(self) -> Path:
+        return self.curated_dir / "artists.parquet"
+
+    @property
+    def curated_artist_aliases(self) -> Path:
+        return self.curated_dir / "artist_aliases.parquet"
+
 
 DEFAULT_DATA_PATHS = DataPaths()
