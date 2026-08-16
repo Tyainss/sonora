@@ -83,7 +83,7 @@ def _(
     aliases = collect_artist_aliases(events)
     candidates = generate_artist_candidate_pairs(events)
     evidence = score_artist_candidate_evidence(events, candidates)
-    return aliases, candidates, evidence, events
+    return aliases, candidates, events, evidence
 
 
 @app.cell(hide_code=True)
@@ -132,7 +132,7 @@ def _(candidates, pl):
     )
 
     candidate_source_summary
-    return (candidate_source_summary,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -257,7 +257,7 @@ def _(candidate_config, events, normalize_for_comparison, pl):
     )
 
     shared_track_titles.head(30)
-    return (shared_track_titles,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -296,7 +296,7 @@ def _(evidence, pl):
     )
 
     catalogue_only_candidates.head(40)
-    return (catalogue_only_candidates,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -344,7 +344,7 @@ def _(evidence, pl):
 
     evidence_distribution = pl.DataFrame(_distribution_rows)
     evidence_distribution
-    return (evidence_distribution,)
+    return
 
 
 @app.cell
@@ -356,7 +356,7 @@ def _(evidence, pl):
     )
 
     identifier_relation_summary
-    return (identifier_relation_summary,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -412,7 +412,7 @@ def _(evidence, pl):
     )
 
     catalogue_supported_pairs.head(40)
-    return (catalogue_supported_pairs,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -457,13 +457,13 @@ def _(evidence, pl):
     )
 
     lexical_only_pairs.head(40)
-    return (lexical_only_pairs,)
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Some real matches have no catalogue overlap at all. Examples include `JAY-Z`, `The Legendary Tigerman`, `Chet Baker`, and `Miles Davis` variants. Name evidence therefore still needs to stand on its own for some aliases.
+    Similar names without catalogue support contain both useful aliases and false similarities. `JAY-Z` and `The Legendary Tigerman` variants are genuine matches, while pairs such as `Chet Baker` / `Chet Faker` show why fuzzy name similarity alone cannot justify a merge.
     """)
     return
 
@@ -498,7 +498,7 @@ def _(evidence, pl):
     )
 
     artist_mbid_conflicts.head(40)
-    return (artist_mbid_conflicts,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -539,7 +539,7 @@ def _(evidence, pl):
     )
 
     fuzzy_metric_difference.head(40)
-    return (fuzzy_metric_difference,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -555,7 +555,7 @@ def _(mo):
     mo.md(r"""
     ## Evidence summary
 
-    Name matching handles most spelling and formatting variants. Track matching adds useful recall for cases such as `Miguel Luz` / `Mike Lyte`, but it also picks up collaborations and related artists, so catalogue overlap needs other evidence before a merge. Levenshtein and WRatio both add useful information, while artist MBIDs are mainly negative evidence in this dataset.
+    Name matching handles clear spelling and formatting variants, while track overlap adds recall for cases such as `Miguel Luz` / `Mike Lyte`. Both sources also produce convincing false candidates, so automatic merges stay limited to combinations of evidence that are strong enough to favour precision. Artist MBIDs mainly help by identifying conflicts in this dataset.
     """)
     return
 
@@ -609,7 +609,7 @@ def _(pl, resolution_config):
         }
     )
     resolution_settings
-    return (resolution_settings,)
+    return
 
 
 @app.cell
@@ -626,7 +626,21 @@ def _(decisions, pl):
         .sort(["identity_decision", "pairs"], descending=[False, True])
     )
     decision_summary
-    return (decision_summary,)
+    return
+
+
+@app.cell(hide_code=True)
+def _(decisions, mo, pl):
+    _merge_count = decisions.filter(pl.col("identity_decision") == "merge").height
+    _possible_count = decisions.filter(
+        pl.col("identity_decision") == "possible_match"
+    ).height
+    _reject_count = decisions.filter(pl.col("identity_decision") == "reject").height
+
+    mo.md(f"""
+    The automatic resolver merges **{_merge_count:,} pairs** and leaves **{_possible_count:,}** as possible matches. The remaining **{_reject_count:,}** candidates are rejected. The small merge set is deliberate: uncertain cases stay separate rather than risking a false canonical identity.
+    """)
+    return
 
 
 @app.cell
@@ -651,7 +665,7 @@ def _(decisions, mo, pl):
         )
     )
     mo.ui.table(merge_pairs, pagination=False, selection=None, max_height=600)
-    return (merge_pairs,)
+    return
 
 
 @app.cell
@@ -681,7 +695,7 @@ def _(decisions, mo, pl):
         selection=None,
         max_height=700,
     )
-    return (possible_matches,)
+    return
 
 
 @app.cell
@@ -740,7 +754,28 @@ def _(pl, reference_pair_decisions):
         .sort("automatic_outcome")
     )
     reference_outcome_summary
-    return (reference_outcome_summary,)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pl, reference_pair_decisions):
+    _resolved = reference_pair_decisions.filter(
+        pl.col("automatic_outcome") == "resolved"
+    ).height
+    _unresolved = reference_pair_decisions.filter(
+        pl.col("automatic_outcome") == "unresolved"
+    ).height
+    _kept_separate = reference_pair_decisions.filter(
+        pl.col("automatic_outcome") == "kept_separate"
+    ).height
+    _false_merges = reference_pair_decisions.filter(
+        pl.col("automatic_outcome") == "false_merge"
+    ).height
+
+    mo.md(f"""
+    Among the manually checked examples, the resolver finds **{_resolved}** known aliases and leaves **{_unresolved}** same-artist pairs unresolved. It keeps **{_kept_separate}** known different-artist pairs separate, with **{_false_merges} false merges**. Leaving the unresolved aliases separate is safer than merging them on weak evidence.
+    """)
+    return
 
 
 @app.cell(hide_code=True)
@@ -780,7 +815,7 @@ def _(decisions, pl):
         )
     )
     catalogue_only_decisions
-    return (catalogue_only_decisions,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -813,7 +848,7 @@ def _(
         config=resolution_config,
         existing_aliases=existing_aliases,
     )
-    return blocked_merges, clusters, existing_aliases
+    return blocked_merges, clusters
 
 
 @app.cell
@@ -840,6 +875,16 @@ def _(clusters, mo, pl):
 @app.cell
 def _(blocked_merges):
     blocked_merges
+    return
+
+
+@app.cell(hide_code=True)
+def _(blocked_merges, mo, multi_alias_clusters):
+    _cluster_count = multi_alias_clusters.height
+    _blocked_count = blocked_merges.height
+    mo.md(f"""
+    The accepted merge edges form **{_cluster_count} multi-alias artist clusters**, with **{_blocked_count} blocked merges**. The resulting clusters contain only high-confidence automatic merges; ambiguous same-artist cases remain separate.
+    """)
     return
 
 
