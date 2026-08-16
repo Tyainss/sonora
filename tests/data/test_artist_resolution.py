@@ -99,12 +99,28 @@ def test_name_and_catalogue_support_can_merge():
     assert row["decision_rule"] == "name_and_catalogue"
 
 
-def test_strong_catalogue_without_name_support_stays_possible():
+def test_bidirectional_catalogue_support_can_merge_without_name_support():
+    row = _decision(
+        name_levenshtein_similarity=0.40,
+        name_wratio=0.53,
+        shared_track_count=7,
+        track_containment=0.54,
+        shared_track_scrobble_share_left=0.74,
+        shared_track_scrobble_share_right=0.62,
+    )
+
+    assert row["identity_decision"] == "merge"
+    assert row["decision_rule"] == "bidirectional_catalogue"
+
+
+def test_one_sided_catalogue_support_stays_possible():
     row = _decision(
         name_levenshtein_similarity=0.30,
         name_wratio=0.45,
         shared_track_count=7,
         track_containment=0.90,
+        shared_track_scrobble_share_left=1.0,
+        shared_track_scrobble_share_right=0.21,
     )
 
     assert row["identity_decision"] == "possible_match"

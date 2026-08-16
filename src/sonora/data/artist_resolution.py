@@ -39,6 +39,9 @@ class ArtistResolutionConfig:
     name_catalogue_wratio: float = 0.88
     name_catalogue_min_shared_tracks: int = 2
     name_catalogue_min_track_containment: float = 0.50
+    catalogue_merge_min_shared_tracks: int = 5
+    catalogue_merge_min_track_containment: float = 0.50
+    catalogue_merge_min_scrobble_share: float = 0.60
     conflict_override_wratio: float = 0.85
     conflict_override_min_shared_tracks: int = 5
     conflict_override_min_track_containment: float = 0.75
@@ -53,6 +56,8 @@ class ArtistResolutionConfig:
             "near_exact_wratio",
             "name_catalogue_wratio",
             "name_catalogue_min_track_containment",
+            "catalogue_merge_min_track_containment",
+            "catalogue_merge_min_scrobble_share",
             "conflict_override_wratio",
             "conflict_override_min_track_containment",
             "possible_name_levenshtein",
@@ -65,6 +70,7 @@ class ArtistResolutionConfig:
 
         for field_name in (
             "name_catalogue_min_shared_tracks",
+            "catalogue_merge_min_shared_tracks",
             "conflict_override_min_shared_tracks",
             "possible_catalogue_min_shared_tracks",
         ):
@@ -186,6 +192,7 @@ def cluster_artist_aliases(
         alias_to_cluster[name] = next_cluster_id
         next_cluster_id += 1
 
+    blocked_rows: list[dict[str, str]] = []
     merge_rows = [
         row
         for row in decisions.iter_rows(named=True)
@@ -193,7 +200,6 @@ def cluster_artist_aliases(
     ]
     merge_rows.sort(key=_merge_sort_key)
 
-    blocked_rows: list[dict[str, str]] = []
     for row in merge_rows:
         left = row["observed_artist_name_left"]
         right = row["observed_artist_name_right"]
@@ -281,6 +287,8 @@ def _decide_pair(
     wratio = float(row["name_wratio"])
     shared_tracks = int(row["shared_track_count"])
     track_containment = float(row["track_containment"] or 0.0)
+    shared_scrobble_share_left = float(row["shared_track_scrobble_share_left"] or 0.0)
+    shared_scrobble_share_right = float(row["shared_track_scrobble_share_right"] or 0.0)
 
     near_exact_name = (
         levenshtein >= config.near_exact_levenshtein
@@ -290,6 +298,12 @@ def _decide_pair(
         wratio >= config.name_catalogue_wratio
         and shared_tracks >= config.name_catalogue_min_shared_tracks
         and track_containment >= config.name_catalogue_min_track_containment
+    )
+    bidirectional_catalogue = (
+        shared_tracks >= config.catalogue_merge_min_shared_tracks
+        and track_containment >= config.catalogue_merge_min_track_containment
+        and shared_scrobble_share_left >= config.catalogue_merge_min_scrobble_share
+        and shared_scrobble_share_right >= config.catalogue_merge_min_scrobble_share
     )
     conflict_override = (
         wratio >= config.conflict_override_wratio
@@ -320,6 +334,7 @@ def _decide_pair(
         exact_name=exact_name,
         near_exact_name=near_exact_name,
         name_and_catalogue=name_and_catalogue,
+        bidirectional_catalogue=bidirectional_catalogue,
         strong_catalogue=strong_catalogue,
         strong_name=strong_name,
     )
@@ -352,6 +367,7 @@ def _decide_without_mbid_conflict(
     exact_name: bool,
     near_exact_name: bool,
     name_and_catalogue: bool,
+    bidirectional_catalogue: bool,
     strong_catalogue: bool,
     strong_name: bool,
 ) -> dict[str, str]:
@@ -361,6 +377,8 @@ def _decide_without_mbid_conflict(
         return _decision("merge", "near_exact_name")
     if name_and_catalogue:
         return _decision("merge", "name_and_catalogue")
+    if bidirectional_catalogue:
+        return _decision("merge", "bidirectional_catalogue")
     if strong_catalogue:
         return _decision("possible_match", "strong_catalogue")
     if strong_name:
@@ -570,14 +588,15 @@ def _merge_sort_key(row: dict[str, object]) -> tuple[object, ...]:
         "same_comparison_name": 1,
         "near_exact_name": 2,
         "name_and_catalogue": 3,
-        "mbid_conflict_overridden_by_catalogue": 4,
+        "bidirectional_catalogue": 4,
+        "mbid_conflict_overridden_by_catalogue": 5,
     }
     return (
         rule_priority.get(str(row["decision_rule"]), 99),
-        -float(row["name_wratio"]),
-        -float(row["name_levenshtein_similarity"]),
-        -float(row["track_containment"] or 0.0),
-        -int(row["shared_track_count"]),
+        -float(row.get("name_wratio", 0.0) or 0.0),
+        -float(row.get("name_levenshtein_similarity", 0.0) or 0.0),
+        -float(row.get("track_containment", 0.0) or 0.0),
+        -int(row.get("shared_track_count", 0) or 0),
         str(row["observed_artist_name_left"]),
         str(row["observed_artist_name_right"]),
     )
