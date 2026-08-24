@@ -1,6 +1,6 @@
 # Project specific ignores
 data/raw/**/*.ndjson
-data/raw/**/*.partial
+data/**/*.partial
 data/raw/lastfm/scrobbles.integrity.json
 data/raw/lastfm/scrobbles.integrity.failed.*.json
 

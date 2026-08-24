@@ -16,7 +16,7 @@ from lastfm_export.pipelines.lastfm_export import (
     collect_verified_scrobbles,
 )
 
-RAW_DIR = Path("data/raw/lastfm")
+from sonora.data.paths import DEFAULT_DATA_PATHS, DataPaths
 
 
 @dataclass
@@ -78,7 +78,11 @@ def _required_env(name: str) -> str:
     return value
 
 
-def export_snapshot(*, cutoff: datetime | None = None) -> Path:
+def export_snapshot(
+    *,
+    cutoff: datetime | None = None,
+    paths: DataPaths = DEFAULT_DATA_PATHS,
+) -> Path:
     """Replace current canonical raw snapshot with a strictly verified export."""
     load_dotenv()
 
@@ -88,8 +92,8 @@ def export_snapshot(*, cutoff: datetime | None = None) -> Path:
 
     cutoff = cutoff.astimezone(UTC).replace(microsecond=0)
     cutoff_unix = int(cutoff.timestamp())
-    output_path = RAW_DIR / "scrobbles.ndjson"
-    metadata_path = output_path.with_suffix(".integrity.json")
+    output_path = paths.raw_lastfm_scrobbles
+    metadata_path = paths.raw_lastfm_integrity
     partial_path = output_path.with_suffix(f"{output_path.suffix}.partial")
     metadata_partial_path = metadata_path.with_suffix(".json.partial")
 
@@ -151,7 +155,7 @@ def export_snapshot(*, cutoff: datetime | None = None) -> Path:
     )
 
     if metadata["status"] != "ok":
-        failure_path = RAW_DIR / (
+        failure_path = paths.raw_lastfm_dir / (
             f"scrobbles.integrity.failed_{cutoff:%Y%m%dT%H%M%SZ}.json"
         )
         _write_json(failure_path, metadata, overwrite=False)

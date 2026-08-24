@@ -13,6 +13,7 @@ dependencies = [
     "marimo>=0.23.16",
     "polars>=1.43.2",
     "pyarrow>=25.0.0",
+    "rapidfuzz>=3.14.5",
 ]
 
 [dependency-groups]
@@ -21,4 +22,11 @@ dev = [
     "dvc>=3.67.1",
     "pytest>=9.1.1",
     "ruff>=0.16.2",
+    "spyder-kernels==3.0.*"
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/marimo/*.py" = ["B018", "PLR1711"]
+
+[tool.ruff.format]
+exclude = ["notebooks/marimo/*.py"]

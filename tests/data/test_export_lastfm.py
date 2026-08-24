@@ -7,6 +7,7 @@ from lastfm_export.integrity import WindowReport
 from lastfm_export.models import Scrobble
 
 from sonora.data import export_lastfm
+from sonora.data.paths import DataPaths
 
 
 class _TTYStream(StringIO):
@@ -39,7 +40,7 @@ def _report(*violations: str) -> WindowReport:
 def _configure_export(monkeypatch, tmp_path, *, registration_unix=1):
     monkeypatch.setenv("LASTFM_API_KEY", "test-key")
     monkeypatch.setenv("LASTFM_USERNAME", "test-user")
-    monkeypatch.setattr(export_lastfm, "RAW_DIR", tmp_path)
+    paths = DataPaths(data_dir=tmp_path / "data")
 
     class FakeLastFMClient:
         def __init__(self, **kwargs):
@@ -49,6 +50,7 @@ def _configure_export(monkeypatch, tmp_path, *, registration_unix=1):
             return registration_unix
 
     monkeypatch.setattr(export_lastfm, "LastFMClient", FakeLastFMClient)
+    return paths
 
 
 def test_progress_reporter_throttles_live_updates_and_keeps_milestones():
@@ -78,7 +80,7 @@ def test_export_snapshot_writes_verified_raw_scrobbles_and_metadata(
     tmp_path, monkeypatch
 ):
     cutoff = datetime(2020, 3, 19, 12, 30, tzinfo=UTC)
-    _configure_export(monkeypatch, tmp_path, registration_unix=123)
+    paths = _configure_export(monkeypatch, tmp_path, registration_unix=123)
     captured = {}
 
     def fake_collect_verified_scrobbles(**kwargs):
@@ -90,9 +92,9 @@ def test_export_snapshot_writes_verified_raw_scrobbles_and_metadata(
     )
     monkeypatch.setattr(export_lastfm, "_lastfm_export_version", lambda: "0.3.0")
 
-    output = export_lastfm.export_snapshot(cutoff=cutoff)
+    output = export_lastfm.export_snapshot(cutoff=cutoff, paths=paths)
 
-    assert output == tmp_path / "scrobbles.ndjson"
+    assert output == paths.raw_lastfm_scrobbles
     assert captured["from_unix"] == 123
     assert captured["to_unix"] == int(cutoff.timestamp())
     assert captured["stop_on_violation"] is True
@@ -101,7 +103,7 @@ def test_export_snapshot_writes_verified_raw_scrobbles_and_metadata(
     assert record["artist_name"] == "Artist"
     assert record["raw"] == {"name": "Track", "artist": {"#text": "Artist"}}
 
-    metadata = json.loads((tmp_path / "scrobbles.integrity.json").read_text())
+    metadata = json.loads(paths.raw_lastfm_integrity.read_text())
     assert metadata["status"] == "ok"
     assert metadata["acquisition_mode"] == "verified"
     assert metadata["integrity_policy"] == "strict"
@@ -114,9 +116,10 @@ def test_integrity_failure_preserves_canonical_snapshot_and_writes_report(
     tmp_path, monkeypatch
 ):
     cutoff = datetime(2020, 3, 19, 12, 30, tzinfo=UTC)
-    _configure_export(monkeypatch, tmp_path)
-    output = tmp_path / "scrobbles.ndjson"
-    metadata = tmp_path / "scrobbles.integrity.json"
+    paths = _configure_export(monkeypatch, tmp_path)
+    output = paths.raw_lastfm_scrobbles
+    metadata = paths.raw_lastfm_integrity
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text('{"track_name":"old"}\n', encoding="utf-8")
     metadata.write_text('{"status":"ok"}\n', encoding="utf-8")
     monkeypatch.setattr(
@@ -126,27 +129,29 @@ def test_integrity_failure_preserves_canonical_snapshot_and_writes_report(
     )
 
     with pytest.raises(RuntimeError, match="failed integrity checks"):
-        export_lastfm.export_snapshot(cutoff=cutoff)
+        export_lastfm.export_snapshot(cutoff=cutoff, paths=paths)
 
     assert output.read_text(encoding="utf-8") == '{"track_name":"old"}\n'
     assert metadata.read_text(encoding="utf-8") == '{"status":"ok"}\n'
-    failure = tmp_path / "scrobbles.integrity.failed_20200319T123000Z.json"
+    failure = paths.raw_lastfm_dir / "scrobbles.integrity.failed_20200319T123000Z.json"
     assert json.loads(failure.read_text(encoding="utf-8"))["status"] == "failed"
 
 
 def test_export_snapshot_rejects_naive_cutoff(tmp_path, monkeypatch):
-    _configure_export(monkeypatch, tmp_path)
+    paths = _configure_export(monkeypatch, tmp_path)
     naive_cutoff = datetime(2020, 3, 19, 12, 30, tzinfo=UTC).replace(tzinfo=None)
 
     with pytest.raises(ValueError, match="timezone-aware"):
-        export_lastfm.export_snapshot(cutoff=naive_cutoff)
+        export_lastfm.export_snapshot(cutoff=naive_cutoff, paths=paths)
 
 
 def test_export_snapshot_requires_registration_timestamp(tmp_path, monkeypatch):
-    _configure_export(monkeypatch, tmp_path, registration_unix=None)
+    paths = _configure_export(monkeypatch, tmp_path, registration_unix=None)
 
     with pytest.raises(RuntimeError, match="registration timestamp"):
-        export_lastfm.export_snapshot(cutoff=datetime(2020, 3, 19, tzinfo=UTC))
+        export_lastfm.export_snapshot(
+            cutoff=datetime(2020, 3, 19, tzinfo=UTC), paths=paths
+        )
 
 
 @pytest.mark.parametrize(
@@ -156,8 +161,11 @@ def test_export_snapshot_requires_registration_timestamp(tmp_path, monkeypatch):
 def test_export_snapshot_rejects_existing_partial_file(
     tmp_path, monkeypatch, partial_name
 ):
-    _configure_export(monkeypatch, tmp_path)
-    (tmp_path / partial_name).write_text("partial", encoding="utf-8")
+    paths = _configure_export(monkeypatch, tmp_path)
+    paths.raw_lastfm_dir.mkdir(parents=True, exist_ok=True)
+    (paths.raw_lastfm_dir / partial_name).write_text("partial", encoding="utf-8")
 
     with pytest.raises(FileExistsError, match="partial Last.fm export"):
-        export_lastfm.export_snapshot(cutoff=datetime(2020, 3, 19, tzinfo=UTC))
+        export_lastfm.export_snapshot(
+            cutoff=datetime(2020, 3, 19, tzinfo=UTC), paths=paths
+        )
