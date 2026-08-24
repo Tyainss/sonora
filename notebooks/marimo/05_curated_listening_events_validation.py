@@ -81,10 +81,20 @@ def _(mo):
 
 @app.cell
 def _(build_button, build_curated_listening_events, mo, paths):
-    mo.stop(not build_button.value)
+    output_path = paths.curated_listening_events
 
-    output_path = build_curated_listening_events(paths=paths)
-    mo.md(f"Built `{output_path}`.")
+    if build_button.value:
+        build_curated_listening_events(paths=paths)
+
+    mo.stop(
+        not output_path.is_file(),
+        mo.callout(
+            "Build the curated listening events before running the checks.",
+            kind="warn",
+        ),
+    )
+
+    output_path
     return (output_path,)
 
 

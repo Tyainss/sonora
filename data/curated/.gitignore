@@ -2,3 +2,4 @@
 /artist_aliases.parquet
 /tracks.parquet
 /track_aliases.parquet
+/listening_events.parquet
