@@ -113,8 +113,7 @@ def resolve_track_identities(
     existing_map = _existing_alias_map(existing_aliases, song_keys=song_keys)
 
     nodes = [
-        (row["artist_id"], row["track_name"])
-        for row in song_keys.iter_rows(named=True)
+        (row["artist_id"], row["track_name"]) for row in song_keys.iter_rows(named=True)
     ]
     parents = {node: node for node in nodes}
 
@@ -175,9 +174,7 @@ def _collapse_rule_expr() -> pl.Expr:
     qualifier = pl.col("comparison_qualifier")
     return (
         pl.when(
-            qualifier.str.contains(
-                r"\b(?:feat(?:uring)?|ft)\b|^(?:duet with|with)\b"
-            )
+            qualifier.str.contains(r"\b(?:feat(?:uring)?|ft)\b|^(?:duet with|with)\b")
         )
         .then(pl.lit("featured_credit"))
         .when(qualifier.str.contains(r"\bremaster(?:ed)?\b"))

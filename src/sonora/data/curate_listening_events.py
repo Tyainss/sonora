@@ -52,32 +52,24 @@ def build_curated_listening_events(
     _validate_event_rows(resolved, expected_rows=expected_rows)
     _require_resolved_ids(resolved, "track_id", label="track")
 
-    resolved = (
-        resolved.join(
-            artists.select("artist_id").with_columns(
-                pl.lit(True).alias("_artist_known")
-            ),
-            on="artist_id",
-            how="left",
-            validate="m:1",
-        )
-        .join(
-            tracks.select(
-                "track_id",
-                pl.col("artist_id").alias("_track_artist_id"),
-            ),
-            on="track_id",
-            how="left",
-            validate="m:1",
-        )
+    resolved = resolved.join(
+        artists.select("artist_id").with_columns(pl.lit(True).alias("_artist_known")),
+        on="artist_id",
+        how="left",
+        validate="m:1",
+    ).join(
+        tracks.select(
+            "track_id",
+            pl.col("artist_id").alias("_track_artist_id"),
+        ),
+        on="track_id",
+        how="left",
+        validate="m:1",
     )
     _validate_event_rows(resolved, expected_rows=expected_rows)
     _validate_references(resolved)
 
-    curated = (
-        resolved.sort("_event_row_id")
-        .select(_CURATED_COLUMNS)
-    )
+    curated = resolved.sort("_event_row_id").select(_CURATED_COLUMNS)
     _validate_curated_events(curated, expected_rows=expected_rows)
     _write_parquet_atomic(curated, paths.curated_listening_events)
     return paths.curated_listening_events

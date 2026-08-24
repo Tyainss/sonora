@@ -41,9 +41,7 @@ def test_song_keys_collapse_known_metadata_but_keep_title_text():
     )
 
     keys = build_track_song_keys(catalogue)
-    by_name = {
-        row["track_name"]: row for row in keys.iter_rows(named=True)
-    }
+    by_name = {row["track_name"]: row for row in keys.iter_rows(named=True)}
 
     assert by_name["Song - 2023 Remaster"]["song_key"] == "song"
     assert by_name["Song (Live)"]["song_key"] == "song"
@@ -78,9 +76,9 @@ def test_same_track_mbid_bridges_different_titles_within_one_artist():
     )
     clusters = _cluster_map(result)
 
-    assert clusters[("artist", "Kirinaki Shima")] == clusters[
-        ("artist", "kirinakijima")
-    ]
+    assert (
+        clusters[("artist", "Kirinaki Shima")] == clusters[("artist", "kirinakijima")]
+    )
 
 
 def test_track_mbid_does_not_bridge_across_artists():
