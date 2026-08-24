@@ -16,7 +16,7 @@ def _(mo):
     mo.md(r"""
     # Curated listening events
 
-    Builds the final event table and checks that canonical IDs were added without losing or multiplying listens.
+    Builds the final listening history with canonical artist and track IDs, then checks that every listen still lines up.
     """)
     return
 
@@ -94,7 +94,7 @@ def _(build_button, build_curated_listening_events, mo, paths):
         ),
     )
 
-    output_path
+    mo.md(f"Using `{output_path}`.")
     return (output_path,)
 
 
@@ -122,13 +122,18 @@ def _(clean_events, curated_events, mo, pl):
     artists_used = curated_events.select(pl.col("artist_id").n_unique()).collect().item()
     tracks_used = curated_events.select(pl.col("track_id").n_unique()).collect().item()
 
+    _count_note = (
+        f"All **{curated_count:,}** listens were preserved."
+        if clean_count == curated_count
+        else "The event counts do not match; check the build before continuing."
+    )
     mo.md(f"""
     - **Clean events:** {clean_count:,}
     - **Curated events:** {curated_count:,}
     - **Artists referenced:** {artists_used:,}
     - **Tracks referenced:** {tracks_used:,}
 
-    The event count should stay exactly the same. Canonicalization changes identity fields, not the listening history itself.
+    {_count_note}
     """)
     return clean_count, curated_count
 
@@ -287,14 +292,17 @@ def _(pl, validation_results):
 
 @app.cell(hide_code=True)
 def _(mo, validation_results):
-    if all(validation_results.values()):
-        mo.md(r"""
-        **Result:** all checks passed. The curated listening-event table is ready to version with DVC.
-
-        Two source rows can become identical after artist/track aliases collapse to the same IDs. That is fine; preserving the event count is the important check here.
-        """)
-    else:
-        mo.md("**Result:** some checks failed. Review them before versioning the dataset.")
+    result = (
+        mo.md(
+            "**All checks passed.** The curated listening history is consistent "
+            "and ready for downstream work."
+        )
+        if all(validation_results.values())
+        else mo.md(
+            "**Some checks failed.** Fix them before using the curated dataset."
+        )
+    )
+    result
     return
 
 
