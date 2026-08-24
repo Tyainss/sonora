@@ -25,3 +25,6 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     assert paths.curated_track_aliases == (
         tmp_path / "sonora-data/curated/track_aliases.parquet"
     )
+    assert paths.curated_listening_events == (
+        tmp_path / "sonora-data/curated/listening_events.parquet"
+    )

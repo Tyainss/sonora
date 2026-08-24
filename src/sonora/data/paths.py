@@ -48,5 +48,9 @@ class DataPaths:
     def curated_track_aliases(self) -> Path:
         return self.curated_dir / "track_aliases.parquet"
 
+    @property
+    def curated_listening_events(self) -> Path:
+        return self.curated_dir / "listening_events.parquet"
+
 
 DEFAULT_DATA_PATHS = DataPaths()
