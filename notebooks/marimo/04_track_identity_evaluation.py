@@ -16,7 +16,7 @@ def _(mo):
     mo.md(r"""
     # Track identity evaluation
 
-    Looks at how track names vary within each resolved artist before choosing track matching rules.
+    Checks how often Last.fm gives the same song different titles, and which differences we can safely collapse.
     """)
     return
 
@@ -26,10 +26,22 @@ def _():
     import polars as pl
 
     from sonora.data.comparison_normalization import normalize_for_comparison
+    from sonora.data.curate_tracks import build_curated_track_tables
     from sonora.data.paths import DEFAULT_DATA_PATHS
+    from sonora.data.track_resolution import (
+        build_track_song_keys,
+        resolve_track_identities,
+    )
 
     paths = DEFAULT_DATA_PATHS
-    return normalize_for_comparison, paths, pl
+    return (
+        build_curated_track_tables,
+        build_track_song_keys,
+        normalize_for_comparison,
+        paths,
+        pl,
+        resolve_track_identities,
+    )
 
 
 @app.cell
@@ -102,12 +114,15 @@ def _(artists, mo, resolved_events):
     _comparison_track_labels = resolved_events.select(
         "artist_id", "comparison_track_name"
     ).n_unique()
+    _formatting_reduction = _observed_track_labels - _comparison_track_labels
 
     mo.md(f"""
     - **Listening events:** {resolved_events.height:,}
     - **Canonical artists:** {artists.height:,}
     - **Observed artist-track labels:** {_observed_track_labels:,}
-    - **Artist-track labels after comparison normalization:** {_comparison_track_labels:,}
+    - **After basic comparison normalization:** {_comparison_track_labels:,}
+
+    Basic formatting only removes **{_formatting_reduction:,}** duplicate labels, so most of the track cleanup is about versions and credits rather than punctuation or casing.
     """)
     return
 
@@ -131,7 +146,7 @@ def _(pl, resolved_events):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Artist identity is already resolved here, so track comparisons stay inside one canonical artist.
+    Track matching stays inside each resolved artist. A title shared by two different artists is never compared here.
     """)
     return
 
@@ -141,7 +156,7 @@ def _(mo):
     mo.md(r"""
     ## 2. Formatting variants
 
-    Comparison normalization removes differences in case, diacritics, punctuation and spacing. Groups with more than one observed title show the variants this already catches.
+    These are titles that already match after simple casing, punctuation, spacing or accent cleanup.
     """)
     return
 
@@ -172,7 +187,9 @@ def _(pl, track_catalogue):
 @app.cell
 def _(exact_normalization_groups, mo):
     mo.md(f"""
-    **{exact_normalization_groups.height:,}** normalized artist-track groups contain more than one observed title spelling.
+    **{exact_normalization_groups.height:,}** groups contain more than one observed spelling. Most are harmless variants such as casing, apostrophes or punctuation.
+
+    The punctuation-only `MAQUINA.` titles are the odd case: their normalized value is empty, so we need to keep their raw titles separate later.
     """)
     return
 
@@ -182,7 +199,7 @@ def _(mo):
     mo.md(r"""
     ## 3. Trailing qualifiers
 
-    Track versions are often written as a qualifier at the end of the title. The next tables inventory parenthesized, bracketed and dash-separated qualifiers without using them to merge anything.
+    A lot of version information sits in parentheses, brackets or after a dash. But that shape alone is not enough: `The World (Is Going Up in Flames)` shows why we cannot just strip everything at the end.
     """)
     return
 
@@ -271,7 +288,7 @@ def _(mo):
     mo.md(r"""
     ## 4. Common version labels
 
-    These broad categories are only for inspection. They help show how often familiar version labels appear and what kinds of titles they cover.
+    Live and remastered tracks are by far the most common recognizable variants, with mixes/remixes a distant third. That is enough volume to make targeted rules worthwhile.
     """)
     return
 
@@ -346,9 +363,9 @@ def _(version_qualified_tracks):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 5. Qualifier variants with a matching base title
+    ## 5. Versions with an observed base title
 
-    For these rows, removing the trailing qualifier produces another observed title by the same canonical artist. This is the most useful set for judging which version markers can be collapsed safely.
+    Here the stripped title also appears on its own for the same artist, which gives us an easy sanity check for the rules.
     """)
     return
 
@@ -393,8 +410,10 @@ def _(pl, qualified_tracks, track_catalogue):
 @app.cell
 def _(mo, qualifier_base_matches, qualified_tracks):
     mo.md(f"""
-    - **Track labels with a trailing qualifier:** {qualified_tracks.height:,}
-    - **Qualifier-bearing labels with an observed base-title match:** {qualifier_base_matches.height:,}
+    - **Titles with a trailing qualifier:** {qualified_tracks.height:,}
+    - **With an observed base-title match:** {qualifier_base_matches.height:,}
+
+    Only a minority have the plain base title in the data, so the production rule cannot depend on seeing both versions first.
     """)
     return
 
@@ -402,105 +421,23 @@ def _(mo, qualifier_base_matches, qualified_tracks):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 6. Proposed song keys
+    ## 6. Song keys
 
-    This proposal removes only qualifiers that look like recording, release or featured-artist metadata. Other trailing text stays part of the title. The result is an evaluation key only; nothing is persisted or merged here.
+    These are the rules used by the resolver. They only strip suffixes that clearly look like version, recording or featured-artist metadata. Unknown suffixes stay part of the title.
     """)
     return
 
 
 @app.cell
-def _(pl, qualified_tracks):
-    proposed_qualified_tracks = qualified_tracks.with_columns(
-        pl.when(
-            pl.col("comparison_qualifier").str.contains(
-                r"\b(?:feat(?:uring)?|ft)\b|^duet with\b"
-            )
-        )
-        .then(pl.lit("featured_credit"))
-        .when(pl.col("comparison_qualifier").str.contains(r"\bremaster(?:ed)?\b"))
-        .then(pl.lit("remaster"))
-        .when(
-            pl.col("comparison_qualifier").str.contains(
-                r"\b(?:live|ao vivo|en vivo)\b"
-            )
-        )
-        .then(pl.lit("live"))
-        .when(
-            pl.col("comparison_qualifier").str.contains(
-                r"\b(?:acoustic|acustic[oa]?)\b"
-            )
-        )
-        .then(pl.lit("acoustic"))
-        .when(pl.col("comparison_qualifier").str.contains(r"\bdemo\b"))
-        .then(pl.lit("demo"))
-        .when(pl.col("comparison_qualifier").str.contains(r"\binstrumental\b"))
-        .then(pl.lit("instrumental"))
-        .when(
-            pl.col("comparison_qualifier").str.contains(
-                r"\bradio\b.*\bedit\b|\bedit\b"
-            )
-        )
-        .then(pl.lit("edit"))
-        .when(pl.col("comparison_qualifier").str.contains(r"\b(?:remix|mix)\b"))
-        .then(pl.lit("mix_or_remix"))
-        .when(pl.col("comparison_qualifier").str.contains(r"\b(?:mono|stereo)\b"))
-        .then(pl.lit("mono_or_stereo"))
-        .when(pl.col("comparison_qualifier").str.contains(r"\bsession\b"))
-        .then(pl.lit("session"))
-        .when(
-            pl.col("comparison_qualifier").str.contains(
-                r"\b(?:anniversary|deluxe|reissue)\b"
-            )
-        )
-        .then(pl.lit("release_edition"))
-        .when(pl.col("comparison_qualifier").str.contains(r"\bversion\b"))
-        .then(pl.lit("version"))
-        .otherwise(None)
-        .alias("collapse_rule")
-    )
-    return (proposed_qualified_tracks,)
+def _(build_track_song_keys, track_catalogue):
+    song_key_catalogue = build_track_song_keys(track_catalogue)
+    return (song_key_catalogue,)
 
 
 @app.cell
-def _(normalize_for_comparison, pl, proposed_qualified_tracks, track_catalogue):
-    proposed_track_catalogue = (
-        track_catalogue.join(
-            proposed_qualified_tracks.select(
-                "artist_id",
-                "track_name",
-                "base_track_name",
-                "collapse_rule",
-            ),
-            on=["artist_id", "track_name"],
-            how="left",
-            validate="1:1",
-        )
-        .with_columns(
-            pl.when(pl.col("collapse_rule").is_not_null())
-            .then(pl.col("base_track_name"))
-            .otherwise(pl.col("track_name"))
-            .alias("proposed_song_name")
-        )
-        .with_columns(
-            normalize_for_comparison(pl.col("proposed_song_name")).alias(
-                "proposed_song_key"
-            )
-        )
-        .with_columns(
-            pl.when(pl.col("proposed_song_key").is_null())
-            .then(pl.concat_str([pl.lit("raw:"), pl.col("track_name")]))
-            .otherwise(pl.col("proposed_song_key"))
-            .alias("safe_proposed_song_key")
-        )
-    )
-    return (proposed_track_catalogue,)
-
-
-@app.cell
-def _(pl, proposed_track_catalogue):
-    proposed_rule_summary = (
-        proposed_track_catalogue.filter(pl.col("collapse_rule").is_not_null())
+def _(pl, song_key_catalogue):
+    rule_summary = (
+        song_key_catalogue.filter(pl.col("collapse_rule").is_not_null())
         .group_by("collapse_rule")
         .agg(
             pl.len().alias("artist_track_labels"),
@@ -508,34 +445,35 @@ def _(pl, proposed_track_catalogue):
         )
         .sort("artist_track_labels", descending=True)
     )
-    proposed_rule_summary
-    return (proposed_rule_summary,)
+    rule_summary
+    return (rule_summary,)
 
 
 @app.cell
-def _(mo, proposed_track_catalogue):
-    _proposed_track_count = proposed_track_catalogue.select(
-        "artist_id", "safe_proposed_song_key"
-    ).n_unique()
-    _null_song_keys = proposed_track_catalogue.get_column(
-        "proposed_song_key"
-    ).null_count()
+def _(mo, song_key_catalogue):
+    _song_key_count = song_key_catalogue.select("artist_id", "song_key").n_unique()
+    _raw_fallbacks = song_key_catalogue.get_column("song_key").str.starts_with(
+        "raw:"
+    ).sum()
+    _reduction = song_key_catalogue.height - _song_key_count
 
     mo.md(f"""
-    - **Artist-track labels before song-key rules:** {proposed_track_catalogue.height:,}
-    - **Proposed canonical song keys:** {_proposed_track_count:,}
-    - **Labels needing a raw-title fallback because normalization is empty:** {_null_song_keys:,}
+    - **Artist-track labels:** {song_key_catalogue.height:,}
+    - **Song keys before MBID matching:** {_song_key_count:,}
+    - **Labels using the raw-title fallback:** {_raw_fallbacks:,}
+
+    The title rules consolidate **{_reduction:,}** labels. That is much more useful than basic formatting cleanup, while still leaving unknown suffixes alone.
     """)
     return
 
 
 @app.cell
-def _(pl, proposed_track_catalogue):
-    proposed_collapse_groups = (
-        proposed_track_catalogue.group_by(
+def _(pl, song_key_catalogue):
+    collapse_groups = (
+        song_key_catalogue.group_by(
             "artist_id",
             "canonical_name",
-            "safe_proposed_song_key",
+            "song_key",
         )
         .agg(
             pl.col("track_name").sort().alias("observed_track_names"),
@@ -549,23 +487,23 @@ def _(pl, proposed_track_catalogue):
             descending=True,
         )
     )
-    proposed_collapse_groups.head(100)
-    return (proposed_collapse_groups,)
+    collapse_groups.head(100)
+    return (collapse_groups,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    The proposal keeps unrecognized qualifiers separate. This lets us inspect plausible same-song variants that the conservative rules deliberately miss before deciding whether another rule is justified.
+    The biggest groups look sensible: repeated live recordings, remasters and other named versions land on the same song. We still leave arrangement-specific or unclear labels alone instead of trying to cover every possible suffix.
     """)
     return
 
 
 @app.cell
-def _(pl, proposed_qualified_tracks, qualifier_base_matches):
+def _(pl, qualifier_base_matches, song_key_catalogue):
     unhandled_base_matches = (
         qualifier_base_matches.join(
-            proposed_qualified_tracks.select(
+            song_key_catalogue.select(
                 "artist_id",
                 "canonical_name",
                 "track_name",
@@ -596,9 +534,17 @@ def _(pl, proposed_qualified_tracks, qualifier_base_matches):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 7. Track MBID evidence
+    The remaining misses are mixed. A few are obvious metadata, while others such as `Mexico City`, `Interlude` or arrangement names are less clear. Keeping them separate is safer than growing a long dataset-specific rule list.
+    """)
+    return
 
-    Track MBIDs are inspected as supporting evidence rather than a merge rule. They may distinguish recordings, so different MBIDs inside one proposed song do not automatically mean the song-level grouping is wrong.
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 7. Track MBIDs
+
+    MBIDs cover enough of the data to help with names that title rules miss. We use a shared track MBID as a merge signal inside one artist, but different MBIDs do not split an otherwise matching song.
     """)
     return
 
@@ -617,8 +563,10 @@ def _(mo, pl, resolved_events):
     _artist_track_labels = resolved_events.select("artist_id", "track_name").n_unique()
 
     mo.md(f"""
-    - **Listening events with a track MBID:** {_events_with_track_mbid:,} / {resolved_events.height:,} ({_events_with_track_mbid / resolved_events.height * 100:.1f}%)
-    - **Observed artist-track labels with at least one track MBID:** {_labels_with_track_mbid:,} / {_artist_track_labels:,} ({_labels_with_track_mbid / _artist_track_labels * 100:.1f}%)
+    - **Events with a track MBID:** {_events_with_track_mbid:,} / {resolved_events.height:,} ({_events_with_track_mbid / resolved_events.height * 100:.1f}%)
+    - **Artist-track labels with a track MBID:** {_labels_with_track_mbid:,} / {_artist_track_labels:,} ({_labels_with_track_mbid / _artist_track_labels * 100:.1f}%)
+
+    Coverage is high enough for MBIDs to be useful as an extra bridge, but not high enough to make them the main identity key.
     """)
     return
 
@@ -643,13 +591,21 @@ def _(pl, resolved_events):
     return (shared_track_mbid_titles,)
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    `Kirinaki Shima` / `kirinakijima` is exactly the kind of case the MBID bridge helps with: the names do not match well, but the identifier does.
+    """)
+    return
+
+
 @app.cell
-def _(pl, proposed_track_catalogue, resolved_events):
-    events_with_proposed_key = resolved_events.join(
-        proposed_track_catalogue.select(
+def _(pl, resolved_events, song_key_catalogue):
+    events_with_song_key = resolved_events.join(
+        song_key_catalogue.select(
             "artist_id",
             "track_name",
-            "safe_proposed_song_key",
+            "song_key",
         ),
         on=["artist_id", "track_name"],
         how="left",
@@ -657,10 +613,10 @@ def _(pl, proposed_track_catalogue, resolved_events):
     )
 
     shared_mbid_across_song_keys = (
-        events_with_proposed_key.filter(pl.col("track_mbid").is_not_null())
+        events_with_song_key.filter(pl.col("track_mbid").is_not_null())
         .group_by("artist_id", "canonical_name", "track_mbid")
         .agg(
-            pl.col("safe_proposed_song_key").n_unique().alias("song_key_count"),
+            pl.col("song_key").n_unique().alias("song_key_count"),
             pl.col("track_name").unique().sort().alias("observed_track_names"),
             pl.len().alias("scrobbles"),
         )
@@ -675,19 +631,19 @@ def _(pl, proposed_track_catalogue, resolved_events):
 
 
 @app.cell
-def _(pl, proposed_track_catalogue, resolved_events):
-    proposed_group_mbid_summary = (
+def _(pl, resolved_events, song_key_catalogue):
+    song_group_mbid_summary = (
         resolved_events.join(
-            proposed_track_catalogue.select(
+            song_key_catalogue.select(
                 "artist_id",
                 "track_name",
-                "safe_proposed_song_key",
+                "song_key",
             ),
             on=["artist_id", "track_name"],
             how="left",
             validate="m:1",
         )
-        .group_by("artist_id", "canonical_name", "safe_proposed_song_key")
+        .group_by("artist_id", "canonical_name", "song_key")
         .agg(
             pl.col("track_name").n_unique().alias("observed_name_count"),
             pl.col("track_name").unique().sort().alias("observed_track_names"),
@@ -702,16 +658,76 @@ def _(pl, proposed_track_catalogue, resolved_events):
             descending=True,
         )
     )
-    proposed_group_mbid_summary.head(80)
-    return (proposed_group_mbid_summary,)
+    song_group_mbid_summary.head(80)
+    return (song_group_mbid_summary,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Evaluation focus
+    The opposite also happens: songs such as `Chicago` have several MBIDs across different recordings. That fits our song-level definition, so an MBID conflict is not a reason to split a group.
+    """)
+    return
 
-    The proposed keys let us review three things before implementation: whether the recognized metadata rules create sensible song groups, which unhandled qualifiers deserve another rule, and whether track MBIDs reveal missed matches or recording-level differences that the title rules should respect.
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 8. Final track resolution
+    """)
+    return
+
+
+@app.cell
+def _(resolve_track_identities, resolved_events):
+    track_resolution = resolve_track_identities(
+        resolved_events.select("artist_id", "track_name", "track_mbid").lazy()
+    )
+    return (track_resolution,)
+
+
+@app.cell
+def _(mo, song_key_catalogue, track_resolution):
+    _song_key_count = song_key_catalogue.select("artist_id", "song_key").n_unique()
+    _track_count = track_resolution.clusters.select(
+        "artist_id", "cluster_key"
+    ).n_unique()
+    _mbid_reduction = _song_key_count - _track_count
+
+    mo.md(f"""
+    - **Song keys from title rules:** {_song_key_count:,}
+    - **Final track clusters after MBID matching:** {_track_count:,}
+    - **Extra merges from MBID links:** {_mbid_reduction:,}
+
+    This is the v1 resolver: conservative title rules first, then same-MBID links within the artist. Everything else stays separate.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 9. Build track tables
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    build_track_tables = mo.ui.run_button(label="Build track tables")
+    build_track_tables
+    return (build_track_tables,)
+
+
+@app.cell
+def _(build_curated_track_tables, build_track_tables, mo, paths):
+    mo.stop(not build_track_tables.value)
+
+    _build = build_curated_track_tables(paths=paths)
+    mo.md(f"""
+    **Tracks:** {_build.tracks.height:,}
+
+    **Aliases:** {_build.track_aliases.height:,}
     """)
     return
 
