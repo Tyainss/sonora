@@ -192,7 +192,7 @@ def _(artist_selector, artist_trajectory_summary, mo):
     )
 
     _gap = _selected_summary["max_gap_days"]
-    _gap_text = f"{_gap:,} days" if _gap is not None else "—"
+    _gap_text = f"{_gap:,} days" if _gap is not None else "-"
 
     mo.md(f"""
     **{_selected_summary['canonical_name']}**  
@@ -1057,6 +1057,22 @@ def _(future_listening_strength, pl):
     return (future_strength_summary,)
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    This table groups artists by **how many of the four weeks after their first strong week they were played again**.
+
+    For each group:
+
+    - `artists` shows how many artists followed that pattern.
+    - `median_best_future_importance_pct` shows how strong their **strongest** follow-up week typically was.
+    - `median_active_future_importance_pct` shows how important their follow-up weeks were **on average, considering only weeks where they were actually played**.
+
+    For example, a value around **90** means that follow-up listening was stronger than roughly 90% of the user's artist-weeks.
+    """)
+    return
+
+
 @app.cell
 def _(alt, future_strength_summary):
     (
@@ -1114,6 +1130,464 @@ def _(mo):
     Returning often and returning strongly are related, but they are not the same. When an artist returns in only one of the next four weeks, that week is typically around the **75th percentile** of the user's artist-weeks. With three active weeks, the strongest follow-up is around the **91st percentile**; with four, around the **95th**.
 
     Some artists return once with another very strong week, while others appear several times at lower importance. Sustained importance therefore needs to consider both how often the artist returns and how important that listening remains.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 7. Real trajectory examples
+
+    The summaries above describe broad patterns. Here we define a few contrasting groups from the same measures and let the data choose a representative artist for each one.
+
+    - **Short burst:** no activity in the previous 12 weeks, none in the next 4, and no clear later return.
+    - **Sudden sustained interest:** no activity in the previous 12 weeks, then activity in all of the next 4.
+    - **Gradual buildup:** activity in at least 2 of the previous 12 weeks, followed by activity in all of the next 4.
+    - **Delayed-adoption candidate:** little immediate follow-up, then at least 4 active weeks between weeks 5 and 40, with a later peak stronger than the first strong week.
+
+    These rules are only used to find contrasting examples. They are not proposed breakout rules. Within each group, we pick the artist whose first strong-week share is closest to the group median, rather than choosing an extreme case by hand.
+
+    The vertical line marks the artist's first top-decile week. Each chart shows 12 weeks before it and 40 weeks after it. The line is weekly listening share, and larger points mean the artist was played on more days that week.
+    """)
+    return
+
+
+@app.cell
+def _(first_strong_recent_history, pl, weekly_artist_listening):
+    _base_candidates = (
+        first_strong_recent_history
+        .join(
+            weekly_artist_listening
+            .select(
+                "user_id",
+                "artist_id",
+                "week",
+                "artist_share_pct",
+                "active_days",
+            )
+            .collect(),
+            on=["user_id", "artist_id", "week"],
+            how="left",
+            validate="1:1",
+        )
+        .select(
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            pl.col("week").alias("first_strong_week"),
+            pl.col("artist_share_pct").alias("first_strong_share_pct"),
+            pl.col("active_days").alias("first_strong_active_days"),
+            "active_weeks_prev_12",
+            "active_weeks_next_4",
+        )
+    )
+
+    _later_candidates = (
+        weekly_artist_listening
+        .join(
+            _base_candidates
+            .filter(pl.col("active_weeks_next_4") <= 1)
+            .drop("canonical_name")
+            .lazy(),
+            on=["user_id", "artist_id"],
+            how="inner",
+            validate="m:1",
+        )
+        .with_columns(
+            (
+                (pl.col("week") - pl.col("first_strong_week"))
+                .dt.total_days()
+                // 7
+            )
+            .cast(pl.Int16)
+            .alias("relative_week")
+        )
+        .filter(pl.col("relative_week").is_between(5, 40))
+        .group_by(
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            "first_strong_week",
+            "first_strong_share_pct",
+            "first_strong_active_days",
+            "active_weeks_prev_12",
+            "active_weeks_next_4",
+        )
+        .agg(
+            pl.len().alias("later_active_weeks"),
+            pl.col("artist_share_pct")
+            .max()
+            .round(2)
+            .alias("later_peak_share_pct"),
+        )
+        .filter(
+            (pl.col("later_active_weeks") >= 4)
+            & (
+                pl.col("later_peak_share_pct")
+                > pl.col("first_strong_share_pct")
+            )
+        )
+        .with_columns(
+            pl.lit("Delayed-adoption candidate").alias("example"),
+            pl.lit(4, dtype=pl.Int8).alias("example_order"),
+        )
+        .collect()
+    )
+
+    _immediate_candidates = (
+        _base_candidates
+        .join(
+            _later_candidates.select(
+                "user_id",
+                "artist_id",
+                "first_strong_week",
+            ),
+            on=["user_id", "artist_id", "first_strong_week"],
+            how="anti",
+        )
+        .with_columns(
+            pl.when(
+                (pl.col("active_weeks_prev_12") == 0)
+                & (pl.col("active_weeks_next_4") == 0)
+            )
+            .then(pl.lit("Short burst"))
+            .when(
+                (pl.col("active_weeks_prev_12") == 0)
+                & (pl.col("active_weeks_next_4") == 4)
+            )
+            .then(pl.lit("Sudden sustained interest"))
+            .when(
+                (pl.col("active_weeks_prev_12") >= 2)
+                & (pl.col("active_weeks_next_4") == 4)
+            )
+            .then(pl.lit("Gradual buildup"))
+            .otherwise(None)
+            .alias("example")
+        )
+        .filter(pl.col("example").is_not_null())
+        .with_columns(
+            pl.col("example")
+            .replace(
+                {
+                    "Short burst": 1,
+                    "Sudden sustained interest": 2,
+                    "Gradual buildup": 3,
+                }
+            )
+            .cast(pl.Int8)
+            .alias("example_order"),
+            pl.lit(None, dtype=pl.UInt32).alias("later_active_weeks"),
+            pl.lit(None, dtype=pl.Float64).alias("later_peak_share_pct"),
+        )
+    )
+
+    _candidate_columns = [
+        "example",
+        "example_order",
+        "user_id",
+        "artist_id",
+        "canonical_name",
+        "first_strong_week",
+        "first_strong_share_pct",
+        "first_strong_active_days",
+        "active_weeks_prev_12",
+        "active_weeks_next_4",
+        "later_active_weeks",
+        "later_peak_share_pct",
+    ]
+
+    trajectory_candidates = pl.concat(
+        [
+            _immediate_candidates.select(_candidate_columns),
+            _later_candidates.select(_candidate_columns),
+        ]
+    )
+
+    trajectory_examples = (
+        trajectory_candidates
+        .with_columns(
+            pl.len().over("example").alias("candidate_count"),
+            pl.col("first_strong_share_pct")
+            .median()
+            .over("example")
+            .alias("_group_median_share"),
+        )
+        .with_columns(
+            (
+                pl.col("first_strong_share_pct")
+                - pl.col("_group_median_share")
+            )
+            .abs()
+            .alias("_share_distance")
+        )
+        .sort(
+            ["example_order", "_share_distance", "canonical_name"]
+        )
+        .group_by("example", maintain_order=True)
+        .first()
+        .drop("_group_median_share", "_share_distance")
+        .sort("example_order")
+    )
+
+    trajectory_examples
+    return (trajectory_examples,)
+
+
+@app.cell(hide_code=True)
+def _(pl, trajectory_examples, weekly_artist_listening):
+    _relative_weeks = pl.DataFrame(
+        {"relative_week": list(range(-12, 41))}
+    )
+
+    _trajectory_grid = (
+        trajectory_examples
+        .select(
+            "example",
+            "example_order",
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            "first_strong_week",
+        )
+        .join(_relative_weeks, how="cross")
+        .with_columns(
+            (
+                pl.col("first_strong_week")
+                + pl.duration(days=7) * pl.col("relative_week")
+            ).alias("week")
+        )
+    )
+
+    _weekly_example_history = (
+        weekly_artist_listening
+        .filter(
+            pl.col("artist_id").is_in(
+                trajectory_examples["artist_id"].to_list()
+            )
+        )
+        .select(
+            "user_id",
+            "artist_id",
+            "week",
+            "artist_scrobbles",
+            "artist_share_pct",
+            "active_days",
+        )
+        .collect()
+    )
+
+    trajectory_example_history = (
+        _trajectory_grid
+        .join(
+            _weekly_example_history,
+            on=["user_id", "artist_id", "week"],
+            how="left",
+            validate="m:1",
+        )
+        .with_columns(
+            pl.col("artist_scrobbles").fill_null(0),
+            pl.col("artist_share_pct").fill_null(0.0),
+            pl.col("active_days").fill_null(0),
+            pl.concat_str(
+                pl.col("example_order").cast(pl.String),
+                pl.lit(". "),
+                "example",
+                pl.lit(" - "),
+                "canonical_name",
+            ).alias("example_label"),
+        )
+        .sort("example_order", "relative_week")
+    )
+    return (trajectory_example_history,)
+
+
+@app.cell
+def _(alt, trajectory_example_history):
+    _base = alt.Chart(trajectory_example_history).encode(
+        x=alt.X(
+            "relative_week:Q",
+            title="Weeks from first strong week",
+            scale=alt.Scale(domain=[-12, 40]),
+        ),
+        y=alt.Y(
+            "artist_share_pct:Q",
+            title="Weekly listening share (%)",
+            scale=alt.Scale(zero=True),
+        ),
+        tooltip=[
+            alt.Tooltip("canonical_name:N", title="Artist"),
+            alt.Tooltip("week:T", title="Week"),
+            alt.Tooltip(
+                "artist_share_pct:Q",
+                title="Listening share (%)",
+                format=".2f",
+            ),
+            alt.Tooltip("artist_scrobbles:Q", title="Scrobbles"),
+            alt.Tooltip("active_days:Q", title="Active days"),
+        ],
+    )
+
+    _line = _base.mark_line()
+    _points = (
+        _base
+        .transform_filter("datum.active_days > 0")
+        .mark_circle()
+        .encode(
+            size=alt.Size(
+                "active_days:Q",
+                title="Active days",
+                scale=alt.Scale(range=[20, 140]),
+            )
+        )
+    )
+    _first_strong_rule = (
+        alt.Chart(trajectory_example_history)
+        .transform_filter("datum.relative_week == 0")
+        .mark_rule(strokeDash=[4, 4])
+        .encode(x=alt.X("relative_week:Q"))
+    )
+
+    (
+        alt.layer(_line, _points, _first_strong_rule)
+        .facet(
+            facet=alt.Facet(
+                "example_label:N",
+                title=None,
+                sort="ascending",
+            ),
+            columns=2,
+        )
+        .properties(spacing=20)
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, trajectory_examples):
+    _names = {
+        _row["example"]: _row["canonical_name"]
+        for _row in trajectory_examples.iter_rows(named=True)
+    }
+
+    mo.md(f"""
+    The selected artists come directly from the groups above rather than from manually chosen names.
+
+    **{_names['Short burst']}** represents a strong week that does not continue. **{_names['Sudden sustained interest']}** moves from no recent activity into repeated listening, while **{_names['Gradual buildup']}** was already appearing before the stronger period.
+
+    **{_names['Delayed-adoption candidate']}** has little immediate follow-up but becomes more active and reaches a stronger peak later. This is useful evidence that the first strong week is only a reference point and may happen before the more meaningful transition.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Repeated low-level listening
+
+    Repetition can also happen without a clear rise in importance. For comparison, we take the artist with the most active weeks among those whose strongest week never reaches the user's top 10% of artist-weeks.
+    """)
+    return
+
+
+@app.cell
+def _(pl, weekly_artist_listening):
+    background_example_summary = (
+        weekly_artist_listening
+        .with_columns(
+            (
+                pl.col("artist_share_pct").rank("average").over("user_id")
+                / pl.len().over("user_id")
+                * 100
+            ).alias("importance_percentile")
+        )
+        .group_by("user_id", "artist_id", "canonical_name")
+        .agg(
+            pl.len().alias("active_weeks"),
+            pl.col("week").min().alias("first_week"),
+            pl.col("week").max().alias("last_week"),
+            pl.col("artist_share_pct")
+            .median()
+            .round(2)
+            .alias("median_share_pct"),
+            pl.col("artist_share_pct")
+            .max()
+            .round(2)
+            .alias("max_share_pct"),
+            pl.col("importance_percentile")
+            .max()
+            .round(1)
+            .alias("max_importance_percentile"),
+        )
+        .filter(pl.col("max_importance_percentile") < 90)
+        .sort("active_weeks", descending=True)
+        .head(1)
+        .collect()
+    )
+
+    background_example_summary
+    return (background_example_summary,)
+
+
+@app.cell
+def _(background_example_summary, pl, weekly_artist_listening):
+    background_example_history = (
+        weekly_artist_listening
+        .filter(
+            pl.col("artist_id")
+            == background_example_summary["artist_id"][0]
+        )
+        .select(
+            "canonical_name",
+            "week",
+            "artist_scrobbles",
+            "artist_share_pct",
+            "active_days",
+        )
+        .sort("week")
+        .collect()
+    )
+    return (background_example_history,)
+
+
+@app.cell
+def _(alt, background_example_history):
+    (
+        alt.Chart(background_example_history)
+        .mark_circle()
+        .encode(
+            x=alt.X("week:T", title="Week"),
+            y=alt.Y(
+                "artist_share_pct:Q",
+                title="Weekly listening share (%)",
+                scale=alt.Scale(zero=True),
+            ),
+            size=alt.Size(
+                "active_days:Q",
+                title="Active days",
+                scale=alt.Scale(range=[20, 140]),
+            ),
+            tooltip=[
+                alt.Tooltip("canonical_name:N", title="Artist"),
+                alt.Tooltip("week:T", title="Week"),
+                alt.Tooltip(
+                    "artist_share_pct:Q",
+                    title="Listening share (%)",
+                    format=".2f",
+                ),
+                alt.Tooltip("artist_scrobbles:Q", title="Scrobbles"),
+                alt.Tooltip("active_days:Q", title="Active days"),
+            ],
+        )
+        .properties(height=240)
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The background example appears regularly across a long period without a comparable jump in importance. This is the other side of the same problem: repeated listening matters, but repetition by itself should not count as a breakout.
     """)
     return
 
