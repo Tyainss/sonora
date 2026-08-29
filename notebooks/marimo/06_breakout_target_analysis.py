@@ -16,7 +16,7 @@ def _(mo):
     mo.md(r"""
     # Breakout target analysis
 
-    Looks at how artist listening changes over time, with a focus on the difference between brief interest and stronger, repeated importance.
+    We want to turn breakout into something we can label from listening history: the first move from background listening into strong, repeated importance.
     """)
     return
 
@@ -37,7 +37,7 @@ def _(mo):
     mo.md(r"""
     ## 1. Artist trajectories
 
-    We start by looking at individual artist histories to see what different listening patterns actually look like: isolated bursts, gradual growth, repeated low-level listening, and stronger adoption.
+    Individual histories help us see the patterns the definition needs to handle: short bursts, gradual buildup, long gaps, and sustained adoption.
     """)
     return
 
@@ -149,7 +149,7 @@ def _(artist_active_days, artists, daily_artist_listening, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Several of the most-listened artists reach **100% daily listening share** at least once, so the strongest single day is too noisy to say much about sustained importance on its own.
+    Single days can be very concentrated on one artist, so daily peaks are too noisy for breakout on their own.
     """)
     return
 
@@ -204,7 +204,7 @@ def _(artist_selector, artist_trajectory_summary, mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    A weekly view makes it easier to see whether strong listening is spread across several days or concentrated in a short burst.
+    The weekly view is more useful because it shows both how much the artist was played and whether that listening was spread across several days.
     """)
     return
 
@@ -304,11 +304,11 @@ def _(alt, artist_selector, selected_artist_history):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 2. Importance and repeated listening
+    ## 2. Importance and repetition
 
-    A breakout should mean more than one busy listening day. We group artist-weeks by how many different days the artist was played and compare their weekly listening share.
+    For each artist-week, we compare how much of the week's listening went to the artist with how many different days they were played.
 
-    The median shows a typical week for each group, while the 75th and 90th percentiles show stronger weeks. This lets us see whether listening spread across more days also tends to mean greater importance.
+    `typical_share_pct` is the middle of each group. `top_10_share_pct` shows a stronger level reached by only about 10% of those weeks.
     """)
     return
 
@@ -357,9 +357,9 @@ def _(pl, weekly_artist_listening):
         .group_by("user_id", "active_days")
         .agg(
             pl.len().alias("artist_weeks"),
-            pl.col("artist_share_pct").median().round(2).alias("median_share_pct"),
-            pl.col("artist_share_pct").quantile(0.75).round(2).alias("p75_share_pct"),
-            pl.col("artist_share_pct").quantile(0.90).round(2).alias("p90_share_pct"),
+            pl.col("artist_share_pct").median().round(2).alias("typical_share_pct"),
+            pl.col("artist_share_pct").quantile(0.75).round(2).alias("top_25_share_pct"),
+            pl.col("artist_share_pct").quantile(0.90).round(2).alias("top_10_share_pct"),
             pl.col("artist_share_pct").max().round(2).alias("max_share_pct"),
             pl.col("artist_scrobbles").median().alias("median_scrobbles"),
         )
@@ -376,7 +376,7 @@ def _(alt, weekly_repetition_summary):
     (
         alt.Chart(weekly_repetition_summary)
         .transform_fold(
-            ["median_share_pct", "p75_share_pct", "p90_share_pct"],
+            ["typical_share_pct", "top_25_share_pct", "top_10_share_pct"],
             as_=["Statistic", "Listening share"],
         )
         .mark_line(point=True)
@@ -409,9 +409,9 @@ def _(alt, weekly_repetition_summary):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Weeks with listening spread across more days are usually much more important. Median weekly share rises from **0.21% with one active day** to **6.00% with five**, **8.80% with six**, and **17.98% with seven**.
+    Listening spread across more days is usually much stronger. Typical weekly share rises from **0.21% with one active day** to **6.00% with five**, **8.80% with six**, and **17.98% with seven**.
 
-    A single-day week can still reach **26.79%** of all listening, though, so neither importance nor repetition is enough on its own.
+    But a one-day week can still reach **26.79%**. We therefore need both importance and repetition.
     """)
     return
 
@@ -419,13 +419,11 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 3. First strong weeks
+    ## 3. A strong week is not enough
 
-    Some artists have one big week and disappear, while others keep showing up afterwards. We take the first time each artist reaches the user's top 10% of artist-weeks and check what happens over the next four weeks.
+    To see how often a big week turns into something lasting, we use the first week where an artist lands in the user's strongest 10% of listening weeks, then count how many of the next four weeks include that artist.
 
-    The summary groups artists by how many of those four weeks they appear in. `artist_pct` shows how common each outcome is.
-
-    The top 10% cut is only a convenient way to surface relatively strong listening here; the breakout threshold is still open.
+    The top 10% is only a marker for this exploration. It is not the breakout threshold.
     """)
     return
 
@@ -444,19 +442,12 @@ def _(pl, weekly_artist_listening):
     _ranked_artist_weeks = (
         weekly_artist_listening
         .with_columns(
-            pl.col("week")
-            .rank("ordinal")
-            .over(["user_id", "artist_id"])
-            .cast(pl.Int32)
-            .alias("artist_active_week_number"),
             (
                 pl.col("artist_share_pct").rank("average").over("user_id")
                 / pl.len().over("user_id")
             ).alias("importance_percentile"),
         )
         .with_columns(
-            (pl.col("artist_active_week_number") - 1)
-            .alias("prior_active_weeks"),
             (pl.col("importance_percentile") * 10)
             .ceil()
             .clip(1, 10)
@@ -505,7 +496,6 @@ def _(pl, weekly_artist_listening):
             "artist_scrobbles",
             "artist_share_pct",
             "active_days",
-            "prior_active_weeks",
             "user_history_days",
         )
     )
@@ -523,7 +513,6 @@ def _(first_strong_weeks, pl, weekly_artist_listening):
                     pl.col("week") - pl.duration(days=7 * _weeks_ahead)
                 ).alias("week"),
                 pl.lit(_weeks_ahead).alias("weeks_ahead"),
-                pl.col("artist_share_pct").alias("future_share_pct"),
             )
             for _weeks_ahead in range(1, 5)
         ]
@@ -545,20 +534,13 @@ def _(first_strong_weeks, pl, weekly_artist_listening):
             "artist_scrobbles",
             "artist_share_pct",
             "active_days",
-            "prior_active_weeks",
             "user_history_days",
         )
         .agg(
-            pl.col("future_share_pct")
+            pl.col("weeks_ahead")
             .is_not_null()
             .sum()
-            .alias("active_weeks_next_4"),
-            (
-                (pl.col("weeks_ahead") == 1)
-                & pl.col("future_share_pct").is_not_null()
-            )
-            .any()
-            .alias("active_next_week"),
+            .alias("active_weeks_next_4")
         )
         .sort(
             ["active_weeks_next_4", "artist_share_pct"],
@@ -582,12 +564,6 @@ def _(first_strong_week_persistence, pl):
             .median()
             .round(2)
             .alias("median_strong_week_share_pct"),
-            pl.col("active_days")
-            .median()
-            .alias("median_active_days"),
-            pl.col("prior_active_weeks")
-            .median()
-            .alias("median_prior_active_weeks"),
         )
         .with_columns(
             (
@@ -602,63 +578,15 @@ def _(first_strong_week_persistence, pl):
     )
 
     first_strong_persistence_summary
-    return (first_strong_persistence_summary,)
-
-
-@app.cell
-def _(alt, first_strong_persistence_summary):
-    (
-        alt.Chart(first_strong_persistence_summary)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "active_weeks_next_4:O",
-                title="Active weeks in following 4 weeks",
-            ),
-            y=alt.Y(
-                "artists:Q",
-                title="Artists",
-            ),
-            detail="user_id:N",
-            tooltip=[
-                alt.Tooltip(
-                    "active_weeks_next_4:O",
-                    title="Active weeks next 4",
-                ),
-                alt.Tooltip("artists:Q", title="Artists"),
-                alt.Tooltip(
-                    "artist_pct:Q",
-                    title="Artists (%)",
-                    format=".1f",
-                ),
-                alt.Tooltip(
-                    "median_strong_week_share_pct:Q",
-                    title="Median strong-week share (%)",
-                    format=".2f",
-                ),
-                alt.Tooltip(
-                    "median_active_days:Q",
-                    title="Median active days",
-                    format=".1f",
-                ),
-                alt.Tooltip(
-                    "median_prior_active_weeks:Q",
-                    title="Median prior active weeks",
-                    format=".1f",
-                ),
-            ],
-        )
-        .properties(height=320)
-    )
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    A first strong week often does **not** turn into sustained listening. **36% of artists disappear for all four following weeks**, while only **8% appear in every one of them**.
+    A big first week often fades quickly: **36% of artists disappear for all four following weeks**, while only **8% appear in every one**.
 
-    Artists that keep returning tend to have a somewhat stronger and more spread-out first strong week, but there is still plenty of overlap. A big week by itself does not cleanly separate a lasting adoption from a short burst.
+    A single strong week is therefore not enough to call a breakout.
     """)
     return
 
@@ -666,11 +594,11 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 4. History before a first strong week
+    ## 4. The start of the listening history
 
-    The beginning of a user's listening history is harder to interpret. An artist may look like a new breakout simply because tracking started after they were already important.
+    The first months are harder to trust because tracking may have started after some artists were already important.
 
-    We compare first strong weeks by how much user history existed beforehand to see how large that early-history effect is.
+    We compare first strong weeks by how much listening history came before them.
     """)
     return
 
@@ -694,20 +622,15 @@ def _(first_strong_week_persistence, pl):
         .group_by("user_id", "history_available")
         .agg(
             pl.len().alias("artists"),
-            (
-                pl.col("active_next_week").mean() * 100
-            )
-            .round(1)
-            .alias("active_next_week_pct"),
             pl.col("active_weeks_next_4")
             .mean()
             .round(2)
-            .alias("mean_active_weeks_next_4"),
+            .alias("avg_active_weeks_next_4"),
             (
                 (pl.col("active_weeks_next_4") >= 2).mean() * 100
             )
             .round(1)
-            .alias("active_2plus_weeks_pct"),
+            .alias("active_in_2plus_next_4_pct"),
         )
         .with_columns(
             pl.col("history_available")
@@ -728,74 +651,82 @@ def _(first_strong_week_persistence, pl):
     )
 
     first_strong_by_user_history
-    return (first_strong_by_user_history,)
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    `mean_active_weeks_next_4` is the average number of the next four weeks in which the artist appears. `active_2plus_weeks_pct` is the share of artists that appear in at least two of them.
+    `avg_active_weeks_next_4` is simply how many of the next four weeks the artist appears in on average.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Early "first strong weeks" are much more likely to continue. In the first three months, artists appear in about **2.5 of the next four weeks** on average; after a year, that falls to about **1.1**.
+
+    That suggests some early cases were already established when tracking began.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    To keep the rest of this dataset analysis cleaner, we compare a few possible cutoffs for how much user history should exist before a candidate event.
     """)
     return
 
 
 @app.cell
-def _(alt, first_strong_by_user_history):
-    (
-        alt.Chart(first_strong_by_user_history)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "history_available:N",
-                title="User history available",
-                sort=[
-                    "<1 month",
-                    "1–3 months",
-                    "3–6 months",
-                    "6–12 months",
-                    "12+ months",
-                ],
-            ),
-            y=alt.Y(
-                "mean_active_weeks_next_4:Q",
-                title="Active weeks in following 4 weeks",
-                scale=alt.Scale(domain=[0, 4]),
-            ),
-            detail="user_id:N",
-            tooltip=[
-                alt.Tooltip(
-                    "history_available:N",
-                    title="History available",
-                ),
-                alt.Tooltip("artists:Q", title="Artists"),
-                alt.Tooltip(
-                    "active_next_week_pct:Q",
-                    title="Active next week (%)",
-                    format=".1f",
-                ),
-                alt.Tooltip(
-                    "mean_active_weeks_next_4:Q",
-                    title="Active weeks next 4",
-                    format=".2f",
-                ),
-                alt.Tooltip(
-                    "active_2plus_weeks_pct:Q",
-                    title="Active in 2+ weeks (%)",
-                    format=".1f",
-                ),
-            ],
+def _(first_strong_week_persistence, pl):
+    _warmup_days = {
+        "3 months": 90,
+        "6 months": 180,
+        "9 months": 270,
+        "12 months": 365,
+    }
+
+    _warmup_rows = []
+    for _label, _days in _warmup_days.items():
+        _eligible = first_strong_week_persistence.filter(
+            pl.col("user_history_days") >= _days
         )
-        .properties(height=320)
-    )
+
+        _warmup_rows.append(
+            {
+                "warm_up": _label,
+                "candidates": _eligible.height,
+                "retained_pct": round(
+                    _eligible.height
+                    / first_strong_week_persistence.height
+                    * 100,
+                    1,
+                ),
+                "active_in_2plus_next_4_pct": _eligible.select(
+                    (
+                        (pl.col("active_weeks_next_4") >= 2).mean()
+                        * 100
+                    )
+                    .round(1)
+                ).item(),
+            }
+        )
+
+    warmup_summary = pl.DataFrame(_warmup_rows)
+
+    warmup_summary
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    First strong weeks near the start of this history are much more likely to keep appearing afterwards. In the first three months, artists are active in about **2.5 of the following four weeks** on average; after a year of observed history, that falls to about **1.1 weeks**.
+    No cutoff clearly stands out. For the rest of the target analysis, we will only study possible breakout dates after **12 months** of user history. It still keeps **468 of 616 candidates (76.0%)**.
 
-    This is a strong sign of left-censoring near the beginning of the data: some early "first" strong weeks are probably artists that were already established before tracking started. We therefore need a user-history warm-up rule, but one user's history is not enough to choose its final length yet.
+    This is only an analysis choice for this dataset, not a rule that Sonora users need 12 months of history. Earlier artist history still counts when deciding whether the artist had already broken out.
     """)
     return
 
@@ -803,11 +734,11 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 5. Listening before the first strong week
+    ## 5. Listening before the strong week
 
-    A strong week can arrive suddenly or after lighter listening has already started. We count how many of the previous 12 weeks contained the artist and compare what happens afterwards.
+    A breakout can happen suddenly or build up from lighter listening. For the rest of this analysis, we only look at strong weeks after the first 12 months, then count how many of the previous 12 weeks included the artist.
 
-    To avoid the uncertain start of the listening history, this comparison only includes first strong weeks after at least a year of observed user history. The 12-week lookback is only an exploratory window here.
+    The 12-week lookback is only for this comparison.
     """)
     return
 
@@ -874,12 +805,12 @@ def _(first_strong_recent_history, pl):
             pl.col("active_weeks_next_4")
             .mean()
             .round(2)
-            .alias("mean_active_weeks_next_4"),
+            .alias("avg_active_weeks_next_4"),
             (
                 (pl.col("active_weeks_next_4") >= 2).mean() * 100
             )
             .round(1)
-            .alias("active_2plus_weeks_pct"),
+            .alias("active_in_2plus_next_4_pct"),
         )
         .with_columns(
             pl.col("prior_active_weeks")
@@ -892,55 +823,17 @@ def _(first_strong_recent_history, pl):
     )
 
     prior_activity_summary
-    return (prior_activity_summary,)
-
-
-@app.cell
-def _(alt, prior_activity_summary):
-    (
-        alt.Chart(prior_activity_summary)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "prior_active_weeks:N",
-                title="Active weeks in previous 12 weeks",
-                sort=["0", "1", "2+"],
-            ),
-            y=alt.Y(
-                "active_2plus_weeks_pct:Q",
-                title="Active in 2+ of following 4 weeks (%)",
-                scale=alt.Scale(domain=[0, 100]),
-            ),
-            detail="user_id:N",
-            tooltip=[
-                alt.Tooltip(
-                    "prior_active_weeks:N",
-                    title="Prior active weeks",
-                ),
-                alt.Tooltip("artists:Q", title="Artists"),
-                alt.Tooltip(
-                    "mean_active_weeks_next_4:Q",
-                    title="Active weeks next 4",
-                    format=".2f",
-                ),
-                alt.Tooltip(
-                    "active_2plus_weeks_pct:Q",
-                    title="Active in 2+ weeks (%)",
-                    format=".1f",
-                ),
-            ],
-        )
-        .properties(height=320)
-    )
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Recent listening before the first strong week is a useful signal. Artists with **no activity in the previous 12 weeks** continue into at least two of the next four weeks **24.3%** of the time. That rises to **47.6%** with one prior active week and **53.2%** with two or more.
+    Some earlier listening makes continued interest more common: **24.3%** of artists with no activity in the previous 12 weeks appear in at least two of the next four, compared with **47.6%** after one prior week and **53.2%** after two or more.
 
-    The difference is meaningful, but sudden adoption still happens: some artists go from no recent listening to sustained importance. A breakout definition should allow both gradual buildup and sharper transitions.
+    But sudden adoption still happens. A breakout must allow both gradual buildup and a sharper jump.
+
+    Earlier listening, even isolated strong periods, does not rule out a later first breakout. The artist only stops being eligible once an earlier period actually meets the final breakout rule.
     """)
     return
 
@@ -948,207 +841,18 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 6. Strength after the first strong week
+    ## 6. Real examples
 
-    Counting any later listen can make persistence look stronger than it really is. We compare how often the artist returns with how important those return weeks are relative to the user's own artist-week history.
+    The tables are easier to judge when we look at real histories. We pick one example of four patterns from the data:
 
-    As above, this view only includes first strong weeks after at least a year of observed user history.
-    """)
-    return
+    - **Short burst:** a strong week, then little or no follow-up.
+    - **Sudden adoption:** little recent listening, then several active weeks.
+    - **Gradual buildup:** repeated lighter listening before the stronger period.
+    - **Delayed adoption:** little immediate follow-up, then a stronger period later.
 
+    These rules only choose examples; they are not breakout rules. Each artist is picked from near the middle of its group rather than by hand.
 
-@app.cell
-def _(first_strong_week_persistence, pl, weekly_artist_listening):
-    _weekly_artist_importance = (
-        weekly_artist_listening
-        .with_columns(
-            (
-                pl.col("artist_share_pct").rank("average").over("user_id")
-                / pl.len().over("user_id")
-            ).alias("importance_percentile")
-        )
-    )
-
-    _future_weeks = pl.concat(
-        [
-            first_strong_week_persistence
-            .lazy()
-            .filter(pl.col("user_history_days") >= 365)
-            .select(
-                "user_id",
-                "artist_id",
-                "canonical_name",
-                "week",
-                "active_weeks_next_4",
-            )
-            .with_columns(
-                (
-                    pl.col("week") + pl.duration(days=7 * _weeks_ahead)
-                ).alias("future_week")
-            )
-            for _weeks_ahead in range(1, 5)
-        ]
-    )
-
-    future_listening_strength = (
-        _future_weeks
-        .join(
-            _weekly_artist_importance.select(
-                "user_id",
-                "artist_id",
-                pl.col("week").alias("future_week"),
-                pl.col("importance_percentile")
-                .alias("future_importance_percentile"),
-            ),
-            on=["user_id", "artist_id", "future_week"],
-            how="left",
-            validate="m:1",
-        )
-        .with_columns(
-            pl.col("future_importance_percentile").fill_null(0.0)
-        )
-        .group_by(
-            "user_id",
-            "artist_id",
-            "canonical_name",
-            "week",
-            "active_weeks_next_4",
-        )
-        .agg(
-            (
-                pl.col("future_importance_percentile").max() * 100
-            )
-            .round(1)
-            .alias("best_future_importance_pct"),
-            (
-                pl.col("future_importance_percentile")
-                .filter(pl.col("future_importance_percentile") > 0)
-                .mean()
-                * 100
-            )
-            .round(1)
-            .alias("mean_active_future_importance_pct"),
-        )
-    )
-    return (future_listening_strength,)
-
-
-@app.cell
-def _(future_listening_strength, pl):
-    future_strength_summary = (
-        future_listening_strength
-        .group_by("user_id", "active_weeks_next_4")
-        .agg(
-            pl.len().alias("artists"),
-            pl.col("best_future_importance_pct")
-            .median()
-            .round(1)
-            .alias("median_best_future_importance_pct"),
-            pl.col("mean_active_future_importance_pct")
-            .median()
-            .round(1)
-            .alias("median_active_future_importance_pct"),
-        )
-        .sort("user_id", "active_weeks_next_4")
-        .collect()
-    )
-
-    future_strength_summary
-    return (future_strength_summary,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    This table groups artists by **how many of the four weeks after their first strong week they were played again**.
-
-    For each group:
-
-    - `artists` shows how many artists followed that pattern.
-    - `median_best_future_importance_pct` shows how strong their **strongest** follow-up week typically was.
-    - `median_active_future_importance_pct` shows how important their follow-up weeks were **on average, considering only weeks where they were actually played**.
-
-    For example, a value around **90** means that follow-up listening was stronger than roughly 90% of the user's artist-weeks.
-    """)
-    return
-
-
-@app.cell
-def _(alt, future_strength_summary):
-    (
-        alt.Chart(future_strength_summary)
-        .transform_fold(
-            [
-                "median_best_future_importance_pct",
-                "median_active_future_importance_pct",
-            ],
-            as_=["Measure", "Importance percentile"],
-        )
-        .mark_line(point=True)
-        .encode(
-            x=alt.X(
-                "active_weeks_next_4:O",
-                title="Active weeks in following 4 weeks",
-            ),
-            y=alt.Y(
-                "Importance percentile:Q",
-                title="Importance percentile",
-                scale=alt.Scale(domain=[0, 100]),
-            ),
-            color=alt.Color(
-                "Measure:N",
-                title=None,
-                scale=alt.Scale(
-                    domain=[
-                        "median_best_future_importance_pct",
-                        "median_active_future_importance_pct",
-                    ],
-                ),
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    "active_weeks_next_4:O",
-                    title="Active weeks next 4",
-                ),
-                alt.Tooltip("artists:Q", title="Artists"),
-                alt.Tooltip("Measure:N", title="Measure"),
-                alt.Tooltip(
-                    "Importance percentile:Q",
-                    title="Importance percentile",
-                    format=".1f",
-                ),
-            ],
-        )
-        .properties(height=320)
-    )
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    Returning often and returning strongly are related, but they are not the same. When an artist returns in only one of the next four weeks, that week is typically around the **75th percentile** of the user's artist-weeks. With three active weeks, the strongest follow-up is around the **91st percentile**; with four, around the **95th**.
-
-    Some artists return once with another very strong week, while others appear several times at lower importance. Sustained importance therefore needs to consider both how often the artist returns and how important that listening remains.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## 7. Real trajectory examples
-
-    The summaries above describe broad patterns. Here we define a few contrasting groups from the same measures and let the data choose a representative artist for each one.
-
-    - **Short burst:** no activity in the previous 12 weeks, none in the next 4, and no clear later return.
-    - **Sudden sustained interest:** no activity in the previous 12 weeks, then activity in all of the next 4.
-    - **Gradual buildup:** activity in at least 2 of the previous 12 weeks, followed by activity in all of the next 4.
-    - **Delayed-adoption candidate:** little immediate follow-up, then at least 4 active weeks between weeks 5 and 40, with a later peak stronger than the first strong week.
-
-    These rules are only used to find contrasting examples. They are not proposed breakout rules. Within each group, we pick the artist whose first strong-week share is closest to the group median, rather than choosing an extreme case by hand.
-
-    The vertical line marks the artist's first top-decile week. Each chart shows 12 weeks before it and 40 weeks after it. The line is weekly listening share, and larger points mean the artist was played on more days that week.
+    The vertical line marks the first top-10% week. Larger points mean the artist was played on more days that week.
     """)
     return
 
@@ -1229,7 +933,7 @@ def _(first_strong_recent_history, pl, weekly_artist_listening):
             )
         )
         .with_columns(
-            pl.lit("Delayed-adoption candidate").alias("example"),
+            pl.lit("Delayed adoption").alias("example"),
             pl.lit(4, dtype=pl.Int8).alias("example_order"),
         )
         .collect()
@@ -1256,7 +960,7 @@ def _(first_strong_recent_history, pl, weekly_artist_listening):
                 (pl.col("active_weeks_prev_12") == 0)
                 & (pl.col("active_weeks_next_4") == 4)
             )
-            .then(pl.lit("Sudden sustained interest"))
+            .then(pl.lit("Sudden adoption"))
             .when(
                 (pl.col("active_weeks_prev_12") >= 2)
                 & (pl.col("active_weeks_next_4") == 4)
@@ -1271,7 +975,7 @@ def _(first_strong_recent_history, pl, weekly_artist_listening):
             .replace(
                 {
                     "Short burst": 1,
-                    "Sudden sustained interest": 2,
+                    "Sudden adoption": 2,
                     "Gradual buildup": 3,
                 }
             )
@@ -1471,11 +1175,9 @@ def _(mo, trajectory_examples):
     }
 
     mo.md(f"""
-    The selected artists come directly from the groups above rather than from manually chosen names.
+    **{_names['Short burst']}** fades after the first strong week. **{_names['Sudden adoption']}** jumps from little recent activity into repeated listening, while **{_names['Gradual buildup']}** was already appearing beforehand.
 
-    **{_names['Short burst']}** represents a strong week that does not continue. **{_names['Sudden sustained interest']}** moves from no recent activity into repeated listening, while **{_names['Gradual buildup']}** was already appearing before the stronger period.
-
-    **{_names['Delayed-adoption candidate']}** has little immediate follow-up but becomes more active and reaches a stronger peak later. This is useful evidence that the first strong week is only a reference point and may happen before the more meaningful transition.
+    **{_names['Delayed adoption']}** becomes more active later and reaches a stronger peak. These examples show why the first big week is useful to inspect, but cannot define breakout by itself.
     """)
     return
 
@@ -1485,7 +1187,7 @@ def _(mo):
     mo.md(r"""
     ### Repeated low-level listening
 
-    Repetition can also happen without a clear rise in importance. For comparison, we take the artist with the most active weeks among those whose strongest week never reaches the user's top 10% of artist-weeks.
+    Repetition is not enough either. We also show the artist with the most active weeks while never reaching the user's strongest 10% of listening weeks.
     """)
     return
 
@@ -1587,8 +1289,171 @@ def _(alt, background_example_history):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    The background example appears regularly across a long period without a comparable jump in importance. This is the other side of the same problem: repeated listening matters, but repetition by itself should not count as a breakout.
+    This artist appears regularly for a long time without a comparable rise in importance. Breakout therefore needs a real increase in importance as well as repeated listening.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 7. What should "important" mean?
+
+    Weekly listening share is easy to read: **5% means one in twenty scrobbles that week were the artist**. But the same percentage can be unusually high for one user and ordinary for another.
+
+    A better fit for Sonora is to compare an artist's weekly share with that user's own earlier artist-weeks. The table shows, at the start of each year, the share needed to be among the strongest 20%, 10%, or 5% of weeks seen before then.
+
+    These are examples to understand the scale, not thresholds we are choosing.
+    """)
+    return
+
+
+@app.cell
+def _(pl, weekly_artist_listening):
+    from datetime import date as _date
+
+    _weekly_importance_history = (
+        weekly_artist_listening
+        .select("user_id", "week", "artist_share_pct")
+        .collect()
+    )
+
+    _importance_rows = []
+    for _user_id in _weekly_importance_history["user_id"].unique().to_list():
+        _user_history = (
+            _weekly_importance_history
+            .filter(pl.col("user_id") == _user_id)
+        )
+        _first_week = _user_history["week"].min()
+        _last_week = _user_history["week"].max()
+
+        for _year in range(_first_week.year + 1, _last_week.year + 1):
+            _cutoff = _date(_year, 1, 1)
+
+            if (_cutoff - _first_week).days < 365:
+                continue
+
+            _past_shares = (
+                _user_history
+                .filter(pl.col("week") < _cutoff)
+                ["artist_share_pct"]
+            )
+
+            _importance_rows.append(
+                {
+                    "user_id": _user_id,
+                    "year": _year,
+                    "top_20pct_share": round(
+                        float(_past_shares.quantile(0.80)),
+                        2,
+                    ),
+                    "top_10pct_share": round(
+                        float(_past_shares.quantile(0.90)),
+                        2,
+                    ),
+                    "top_5pct_share": round(
+                        float(_past_shares.quantile(0.95)),
+                        2,
+                    ),
+                }
+            )
+
+    importance_reference_summary = (
+        pl.DataFrame(_importance_rows)
+        .sort("user_id", "year")
+    )
+
+    importance_reference_summary
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The same relative level does not always correspond to the same raw share. For example, the share needed to be in the strongest **10%** of earlier artist-weeks rises from **2.39% in 2022** to about **2.90% in 2026**.
+
+    So we keep **weekly listening share** as the measure of importance, but judge whether it is unusually high against the user's own listening.
+
+    The next question is how much of that earlier history should count.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### How much earlier history should count?
+
+    Using every past year could make the comparison slow to adapt as someone's listening changes.
+
+    We keep the strongest 10% as an example and compare three baselines: all earlier history, the previous 24 months, and the previous 12 months. The 10% level itself is still not decided.
+    """)
+    return
+
+
+@app.cell
+def _(pl, weekly_artist_listening):
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    _importance_history = (
+        weekly_artist_listening
+        .select("user_id", "week", "artist_share_pct")
+        .collect()
+    )
+
+    _baseline_rows = []
+    for _user_id in _importance_history["user_id"].unique().to_list():
+        _user_history = _importance_history.filter(
+            pl.col("user_id") == _user_id
+        )
+        _first_week = _user_history["week"].min()
+        _last_week = _user_history["week"].max()
+
+        for _year in range(_first_week.year + 1, _last_week.year + 1):
+            _cutoff = _date(_year, 1, 1)
+
+            if (_cutoff - _first_week).days < 730:
+                continue
+
+            for _baseline, _days in [
+                ("all_history", None),
+                ("previous_24_months", 730),
+                ("previous_12_months", 365),
+            ]:
+                _past = _user_history.filter(pl.col("week") < _cutoff)
+
+                if _days is not None:
+                    _past = _past.filter(
+                        pl.col("week")
+                        >= _cutoff - _timedelta(days=_days)
+                    )
+
+                _baseline_rows.append(
+                    {
+                        "user_id": _user_id,
+                        "year": _year,
+                        "baseline": _baseline,
+                        "top_10_share_pct": round(
+                            float(
+                                _past["artist_share_pct"].quantile(0.90)
+                            ),
+                            2,
+                        ),
+                    }
+                )
+
+    importance_baseline_summary = (
+        pl.DataFrame(_baseline_rows)
+        .pivot(
+            on="baseline",
+            index=["user_id", "year"],
+            values="top_10_share_pct",
+        )
+        .sort("user_id", "year")
+    )
+
+    importance_baseline_summary
     return
 
 
