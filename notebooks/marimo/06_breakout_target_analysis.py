@@ -23,13 +23,14 @@ def _(mo):
 
 @app.cell
 def _():
+    import datetime as dt
     import altair as alt
     import polars as pl
 
     from sonora.data.paths import DEFAULT_DATA_PATHS
 
     paths = DEFAULT_DATA_PATHS
-    return alt, paths, pl
+    return alt, dt, paths, pl
 
 
 @app.cell(hide_code=True)
@@ -37,7 +38,7 @@ def _(mo):
     mo.md(r"""
     ## 1. Artist trajectories
 
-    Individual histories help us see the patterns the definition needs to handle: short bursts, gradual buildup, long gaps, and sustained adoption.
+    Individual histories help us see the patterns the definition needs to handle: short bursts, gradual buildup, long gaps, and stronger periods that repeat.
     """)
     return
 
@@ -421,7 +422,7 @@ def _(mo):
     mo.md(r"""
     ## 3. A strong week is not enough
 
-    To see how often a big week turns into something lasting, we use the first week where an artist lands in the user's strongest 10% of listening weeks, then count how many of the next four weeks include that artist.
+    To see how often a big week becomes more than a one-off spike, we use the first week where an artist lands in the user's strongest 10% of listening weeks, then count how many of the next four weeks include that artist.
 
     The top 10% is only a marker for this exploration. It is not the breakout threshold.
     """)
@@ -829,7 +830,7 @@ def _(first_strong_recent_history, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Some earlier listening makes continued interest more common: **24.3%** of artists with no activity in the previous 12 weeks appear in at least two of the next four, compared with **47.6%** after one prior week and **53.2%** after two or more.
+    Some earlier listening makes follow-up more common: **24.3%** of artists with no activity in the previous 12 weeks appear in at least two of the next four, compared with **47.6%** after one prior week and **53.2%** after two or more.
 
     But sudden adoption still happens. A breakout must allow both gradual buildup and a sharper jump.
 
@@ -846,9 +847,9 @@ def _(mo):
     The tables are easier to judge when we look at real histories. We pick one example of four patterns from the data:
 
     - **Short burst:** a strong week, then little or no follow-up.
-    - **Sudden adoption:** little recent listening, then several active weeks.
+    - **Sudden rise:** little recent listening, then several active weeks.
     - **Gradual buildup:** repeated lighter listening before the stronger period.
-    - **Delayed adoption:** little immediate follow-up, then a stronger period later.
+    - **Delayed rise:** little immediate follow-up, then a stronger period later.
 
     These rules only choose examples; they are not breakout rules. Each artist is picked from near the middle of its group rather than by hand.
 
@@ -933,7 +934,7 @@ def _(first_strong_recent_history, pl, weekly_artist_listening):
             )
         )
         .with_columns(
-            pl.lit("Delayed adoption").alias("example"),
+            pl.lit("Delayed rise").alias("example"),
             pl.lit(4, dtype=pl.Int8).alias("example_order"),
         )
         .collect()
@@ -960,7 +961,7 @@ def _(first_strong_recent_history, pl, weekly_artist_listening):
                 (pl.col("active_weeks_prev_12") == 0)
                 & (pl.col("active_weeks_next_4") == 4)
             )
-            .then(pl.lit("Sudden adoption"))
+            .then(pl.lit("Sudden rise"))
             .when(
                 (pl.col("active_weeks_prev_12") >= 2)
                 & (pl.col("active_weeks_next_4") == 4)
@@ -975,7 +976,7 @@ def _(first_strong_recent_history, pl, weekly_artist_listening):
             .replace(
                 {
                     "Short burst": 1,
-                    "Sudden adoption": 2,
+                    "Sudden rise": 2,
                     "Gradual buildup": 3,
                 }
             )
@@ -1175,9 +1176,9 @@ def _(mo, trajectory_examples):
     }
 
     mo.md(f"""
-    **{_names['Short burst']}** fades after the first strong week. **{_names['Sudden adoption']}** jumps from little recent activity into repeated listening, while **{_names['Gradual buildup']}** was already appearing beforehand.
+    **{_names['Short burst']}** fades after the first strong week. **{_names['Sudden rise']}** jumps from little recent activity into repeated listening, while **{_names['Gradual buildup']}** was already appearing beforehand.
 
-    **{_names['Delayed adoption']}** becomes more active later and reaches a stronger peak. These examples show why the first big week is useful to inspect, but cannot define breakout by itself.
+    **{_names['Delayed rise']}** becomes more active later and reaches a stronger peak. These examples show why the first big week is useful to inspect, but cannot define breakout by itself.
     """)
     return
 
@@ -1309,9 +1310,7 @@ def _(mo):
 
 
 @app.cell
-def _(pl, weekly_artist_listening):
-    from datetime import date as _date
-
+def _(dt, pl, weekly_artist_listening):
     _weekly_importance_history = (
         weekly_artist_listening
         .select("user_id", "week", "artist_share_pct")
@@ -1328,7 +1327,7 @@ def _(pl, weekly_artist_listening):
         _last_week = _user_history["week"].max()
 
         for _year in range(_first_week.year + 1, _last_week.year + 1):
-            _cutoff = _date(_year, 1, 1)
+            _cutoff = dt.date(_year, 1, 1)
 
             if (_cutoff - _first_week).days < 365:
                 continue
@@ -1392,10 +1391,7 @@ def _(mo):
 
 
 @app.cell
-def _(pl, weekly_artist_listening):
-    from datetime import date as _date
-    from datetime import timedelta as _timedelta
-
+def _(dt, pl, weekly_artist_listening):
     _importance_history = (
         weekly_artist_listening
         .select("user_id", "week", "artist_share_pct")
@@ -1411,7 +1407,7 @@ def _(pl, weekly_artist_listening):
         _last_week = _user_history["week"].max()
 
         for _year in range(_first_week.year + 1, _last_week.year + 1):
-            _cutoff = _date(_year, 1, 1)
+            _cutoff = dt.date(_year, 1, 1)
 
             if (_cutoff - _first_week).days < 730:
                 continue
@@ -1426,7 +1422,7 @@ def _(pl, weekly_artist_listening):
                 if _days is not None:
                     _past = _past.filter(
                         pl.col("week")
-                        >= _cutoff - _timedelta(days=_days)
+                        >= _cutoff - dt.timedelta(days=_days)
                     )
 
                 _baseline_rows.append(
@@ -1454,6 +1450,967 @@ def _(pl, weekly_artist_listening):
     )
 
     importance_baseline_summary
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Recent history gives a somewhat different picture from using everything the user has ever listened to. The difference becomes especially visible from 2024 onward, while the 12- and 24-month comparisons stay fairly close.
+
+    We will use the **previous 24 months** as the working comparison window: recent enough to follow changing listening habits, while using more history than a single year.
+
+    This is a maximum lookback, not a requirement that a user already has 24 months of data. We will revisit the window when we test how sensitive the final breakout rule is.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 8. How high should importance be?
+
+    We compare three possible levels: being among the strongest 20%, 10%, or 5% of artist-weeks from the previous 24 months.
+
+    For each level, we take the first week an artist reaches it and look at how strong that week is and whether the artist keeps appearing afterwards.
+    """)
+    return
+
+
+@app.cell
+def _(dt, pl, weekly_artist_listening):
+    _importance_history = (
+        weekly_artist_listening
+        .select(
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            "week",
+            "artist_share_pct",
+            "active_days",
+        )
+        .collect()
+    )
+
+    _cutoff_rows = []
+    for _user_id in _importance_history["user_id"].unique().to_list():
+        _user_history = _importance_history.filter(
+            pl.col("user_id") == _user_id
+        )
+        _first_week = _user_history["week"].min()
+        _last_week = _user_history["week"].max()
+
+        for _week in _user_history["week"].unique().sort().to_list():
+            if (_week - _first_week).days < 365:
+                continue
+
+            _past = _user_history.filter(
+                (pl.col("week") < _week)
+                & (
+                    pl.col("week")
+                    >= _week - dt.timedelta(days=730)
+                )
+            )["artist_share_pct"]
+
+            _cutoff_rows.append(
+                {
+                    "user_id": _user_id,
+                    "week": _week,
+                    "top_20_cutoff": float(_past.quantile(0.80)),
+                    "top_10_cutoff": float(_past.quantile(0.90)),
+                    "top_5_cutoff": float(_past.quantile(0.95)),
+                }
+            )
+
+    _importance_cutoffs = pl.DataFrame(_cutoff_rows)
+
+    weekly_importance = _importance_history.join(
+        _importance_cutoffs,
+        on=["user_id", "week"],
+        how="inner",
+        validate="m:1",
+    )
+
+    _future_activity = pl.concat(
+        [
+            _importance_history.select(
+                "user_id",
+                "artist_id",
+                (
+                    pl.col("week")
+                    - dt.timedelta(days=7 * _weeks_ahead)
+                ).alias("week"),
+                pl.lit(_weeks_ahead).alias("_weeks_ahead"),
+            )
+            for _weeks_ahead in range(1, 5)
+        ]
+    )
+
+    _summary_rows = []
+    for _label, _cutoff in [
+        ("Top 20%", "top_20_cutoff"),
+        ("Top 10%", "top_10_cutoff"),
+        ("Top 5%", "top_5_cutoff"),
+    ]:
+        _first_qualifying = (
+            weekly_importance
+            .filter(pl.col("artist_share_pct") >= pl.col(_cutoff))
+            .with_columns(
+                pl.col("week")
+                .max()
+                .over("user_id")
+                .alias("_last_week")
+            )
+            .filter(
+                pl.col("week")
+                <= pl.col("_last_week") - dt.timedelta(days=28)
+            )
+            .drop("_last_week")
+            .sort("week")
+            .group_by("user_id", "artist_id", maintain_order=True)
+            .first()
+        )
+
+        _followup = (
+            _first_qualifying
+            .join(
+                _future_activity,
+                on=["user_id", "artist_id", "week"],
+                how="left",
+                validate="1:m",
+            )
+            .group_by("user_id", "artist_id")
+            .agg(
+                pl.col("artist_share_pct").first(),
+                pl.col("active_days").first(),
+                pl.col("_weeks_ahead")
+                .is_not_null()
+                .sum()
+                .alias("active_weeks_next_4"),
+            )
+        )
+
+        _summary_rows.append(
+            {
+                "importance_level": _label,
+                "typical_cutoff_pct": round(
+                    float(_importance_cutoffs[_cutoff].median()),
+                    2,
+                ),
+                "artists": _followup.height,
+                "typical_share_pct": round(
+                    float(_followup["artist_share_pct"].median()),
+                    2,
+                ),
+                "typical_active_days": float(
+                    _followup["active_days"].median()
+                ),
+                "no_activity_next_4_pct": round(
+                    float(
+                        (
+                            _followup["active_weeks_next_4"] == 0
+                        ).mean()
+                        * 100
+                    ),
+                    1,
+                ),
+                "active_in_2plus_next_4_pct": round(
+                    float(
+                        (
+                            _followup["active_weeks_next_4"] >= 2
+                        ).mean()
+                        * 100
+                    ),
+                    1,
+                ),
+            }
+        )
+
+    importance_level_summary = pl.DataFrame(_summary_rows)
+
+    importance_level_summary
+    return (weekly_importance,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The top 20% level still includes many fairly light weeks: the typical first qualifying week has only one active day, and more than half of the artists disappear for the next four weeks.
+
+    The top 5% level is much stronger, but already asks for a fairly intense week before repetition is considered.
+
+    We will use the **top 10%** as the working definition of an important week. It marks a clear rise in listening without requiring the first week itself to be extreme.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 9. How much repetition is enough?
+
+    A breakout can be short-lived. We only need enough repetition to show that the first important week was more than a one-off spike.
+
+    We compare requiring a second important week within a 2-, 3-, 4-, or 5-week period. Nothing after that period is required.
+    """)
+    return
+
+
+@app.cell
+def _(dt, pl, weekly_importance):
+    _user_last_week = (
+        weekly_importance
+        .group_by("user_id")
+        .agg(pl.col("week").max().alias("_last_week"))
+    )
+
+    _important_weeks = (
+        weekly_importance
+        .filter(
+            pl.col("artist_share_pct")
+            >= pl.col("top_10_cutoff")
+        )
+        .join(
+            _user_last_week,
+            on="user_id",
+            how="left",
+            validate="m:1",
+        )
+    )
+
+    _repetition_rows = []
+    for _followup_weeks in range(1, 5):
+        _anchors = (
+            _important_weeks
+            .filter(
+                pl.col("week")
+                <= pl.col("_last_week")
+                - dt.timedelta(days=7 * _followup_weeks)
+            )
+            .drop("_last_week")
+        )
+
+        _future_importance = pl.concat(
+            [
+                weekly_importance.select(
+                    "user_id",
+                    "artist_id",
+                    (
+                        pl.col("week")
+                        - dt.timedelta(days=7 * _weeks_ahead)
+                    ).alias("week"),
+                    (
+                        pl.col("artist_share_pct")
+                        >= pl.col("top_10_cutoff")
+                    ).alias("_future_is_important"),
+                )
+                for _weeks_ahead in range(1, _followup_weeks + 1)
+            ]
+        )
+
+        _qualifying = (
+            _anchors
+            .join(
+                _future_importance,
+                on=["user_id", "artist_id", "week"],
+                how="left",
+                validate="1:m",
+            )
+            .group_by("user_id", "artist_id", "week")
+            .agg(
+                pl.col("_future_is_important")
+                .fill_null(False)
+                .sum()
+                .alias("_extra_important_weeks")
+            )
+            .filter(pl.col("_extra_important_weeks") >= 1)
+            .sort("week")
+            .group_by("user_id", "artist_id", maintain_order=True)
+            .first()
+        )
+
+        _repetition_rows.append(
+            {
+                "period_weeks": _followup_weeks + 1,
+                "candidate_artists": _qualifying.height,
+            }
+        )
+
+    repetition_window_summary = pl.DataFrame(_repetition_rows)
+
+    repetition_window_summary
+    return (repetition_window_summary,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Requiring important listening in consecutive weeks finds **162 artists**. Allowing a 3-week period raises that to **200**, while a fourth week adds only **10 more**. Extending to five weeks adds another **13**.
+
+    We will use **two important weeks within a 3-week period**. This allows one quiet week between them while keeping both strong weeks part of the same short period.
+
+    The artist does not need to stay important afterwards.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 10. The breakout event
+
+    We can now combine the pieces:
+
+    - an **important week** is in the user's strongest 10% of artist-weeks, using up to the previous 24 months;
+    - the artist must have **at least two important weeks within a 3-week period**;
+    - the first important week in the first qualifying period is the breakout week;
+    - earlier weak listening and isolated strong weeks are allowed.
+
+    For the uncertain first year of listening history, we do not assign breakout dates. Artists that already show the same repeated-important pattern there are treated as already established.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(dt, pl, weekly_artist_listening, weekly_importance):
+    _user_last_week = (
+        weekly_importance
+        .group_by("user_id")
+        .agg(pl.col("week").max().alias("_last_week"))
+    )
+
+    _important_anchors = (
+        weekly_importance
+        .filter(
+            pl.col("artist_share_pct")
+            >= pl.col("top_10_cutoff")
+        )
+        .join(
+            _user_last_week,
+            on="user_id",
+            how="left",
+            validate="m:1",
+        )
+        .filter(
+            pl.col("week")
+            <= pl.col("_last_week") - dt.timedelta(days=14)
+        )
+        .drop("_last_week")
+    )
+
+    _future_important = pl.concat(
+        [
+            weekly_importance.select(
+                "user_id",
+                "artist_id",
+                (
+                    pl.col("week")
+                    - dt.timedelta(days=7 * _weeks_ahead)
+                ).alias("week"),
+                pl.lit(_weeks_ahead).alias("_weeks_ahead"),
+                (
+                    pl.col("artist_share_pct")
+                    >= pl.col("top_10_cutoff")
+                ).alias("_future_is_important"),
+            )
+            for _weeks_ahead in range(1, 3)
+        ]
+    )
+
+    _candidate_events = (
+        _important_anchors
+        .join(
+            _future_important,
+            on=["user_id", "artist_id", "week"],
+            how="left",
+            validate="1:m",
+        )
+        .group_by(
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            "week",
+            "artist_share_pct",
+            "active_days",
+        )
+        .agg(
+            pl.col("_future_is_important")
+            .fill_null(False)
+            .sum()
+            .alias("_extra_important_weeks"),
+            pl.col("_weeks_ahead")
+            .filter(pl.col("_future_is_important"))
+            .min()
+            .alias("weeks_until_second_important"),
+        )
+        .filter(pl.col("_extra_important_weeks") >= 1)
+        .sort("week")
+        .group_by("user_id", "artist_id", maintain_order=True)
+        .first()
+    )
+
+    _weekly_history = weekly_artist_listening.collect()
+    _user_first_week = (
+        _weekly_history
+        .group_by("user_id")
+        .agg(pl.col("week").min().alias("_first_week"))
+    )
+
+    _history_with_first_week = (
+        _weekly_history
+        .join(
+            _user_first_week,
+            on="user_id",
+            how="left",
+            validate="m:1",
+        )
+    )
+
+    _warmup_weeks = (
+        _history_with_first_week
+        .filter(
+            pl.col("week")
+            < pl.col("_first_week") + pl.duration(days=365)
+        )
+    )
+
+    _warmup_cutoff = (
+        _warmup_weeks
+        .group_by("user_id")
+        .agg(
+            pl.col("artist_share_pct")
+            .quantile(0.90)
+            .alias("_warmup_top_10_cutoff")
+        )
+    )
+
+    _warmup_importance = (
+        _history_with_first_week
+        .join(
+            _warmup_cutoff,
+            on="user_id",
+            how="left",
+            validate="m:1",
+        )
+        .with_columns(
+            (
+                pl.col("artist_share_pct")
+                >= pl.col("_warmup_top_10_cutoff")
+            ).alias("_is_warmup_important")
+        )
+    )
+
+    _warmup_anchors = (
+        _warmup_importance
+        .filter(
+            (
+                pl.col("week")
+                < pl.col("_first_week") + pl.duration(days=365)
+            )
+            & pl.col("_is_warmup_important")
+        )
+    )
+
+    _warmup_future = pl.concat(
+        [
+            _warmup_importance.select(
+                "user_id",
+                "artist_id",
+                (
+                    pl.col("week")
+                    - dt.timedelta(days=7 * _weeks_ahead)
+                ).alias("week"),
+                pl.col("_is_warmup_important")
+                .alias("_future_is_warmup_important"),
+            )
+            for _weeks_ahead in range(1, 3)
+        ]
+    )
+
+    warmup_established_artists = (
+        _warmup_anchors
+        .join(
+            _warmup_future,
+            on=["user_id", "artist_id", "week"],
+            how="left",
+            validate="1:m",
+        )
+        .group_by(
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            "week",
+        )
+        .agg(
+            pl.col("_future_is_warmup_important")
+            .fill_null(False)
+            .sum()
+            .alias("_extra_important_weeks")
+        )
+        .filter(pl.col("_extra_important_weeks") >= 1)
+        .sort("week")
+        .group_by(
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            maintain_order=True,
+        )
+        .first()
+        .select(
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            pl.col("week").alias("established_in_warmup_week"),
+        )
+    )
+
+    _removed_as_already_established = (
+        _candidate_events
+        .join(
+            warmup_established_artists.select(
+                "user_id",
+                "artist_id",
+            ),
+            on=["user_id", "artist_id"],
+            how="inner",
+        )
+    )
+
+    breakout_events = (
+        _candidate_events
+        .join(
+            warmup_established_artists.select(
+                "user_id",
+                "artist_id",
+            ),
+            on=["user_id", "artist_id"],
+            how="anti",
+        )
+        .select(
+            "user_id",
+            "artist_id",
+            "canonical_name",
+            pl.col("week").alias("breakout_week"),
+            pl.col("artist_share_pct").alias("breakout_share_pct"),
+            pl.col("active_days").alias("breakout_active_days"),
+            "weeks_until_second_important",
+        )
+        .sort("breakout_week")
+    )
+
+    breakout_rule_summary = pl.DataFrame(
+        {
+            "artists_established_in_first_year": [
+                warmup_established_artists.height
+            ],
+            "later_candidates_removed": [
+                _removed_as_already_established.height
+            ],
+            "breakout_events": [breakout_events.height],
+        }
+    )
+
+    breakout_rule_summary
+    return breakout_events, breakout_rule_summary, warmup_established_artists
+
+
+@app.cell
+def _(breakout_events, pl):
+    breakout_events_by_year = (
+        breakout_events
+        .with_columns(
+            pl.col("breakout_week").dt.year().alias("year")
+        )
+        .group_by("year")
+        .agg(pl.len().alias("breakout_events"))
+        .sort("year")
+    )
+
+    breakout_events_by_year
+    return (breakout_events_by_year,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### All breakout artists
+
+    The full list is shown below so we can inspect the labels directly.
+    """)
+    return
+
+
+@app.cell
+def _(breakout_events, pl):
+    breakout_artist_list = (
+        breakout_events
+        .with_columns(
+            pl.col("breakout_week").dt.year().alias("year")
+        )
+        .select(
+            "year",
+            pl.col("canonical_name").alias("artist"),
+            "breakout_week",
+        )
+        .sort("year", "breakout_week", "artist")
+    )
+
+    breakout_artist_list
+    return (breakout_artist_list,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    **92 artists** already show this repeated-important pattern during the first year, so we do not treat later strong periods from those artists as first breakouts. This removes **37 later candidates**.
+
+    The working rule leaves **163 breakout events** after the first-year analysis period.
+    """)
+    return
+
+
+@app.cell
+def _(breakout_events, pl):
+    breakout_event_examples = (
+        breakout_events
+        .with_columns(
+            pl.col("breakout_week").dt.year().alias("year"),
+            pl.col("breakout_share_pct")
+            .median()
+            .over(pl.col("breakout_week").dt.year())
+            .alias("_year_median_share"),
+        )
+        .with_columns(
+            (
+                pl.col("breakout_share_pct")
+                - pl.col("_year_median_share")
+            )
+            .abs()
+            .alias("_share_distance")
+        )
+        .sort(["year", "_share_distance", "canonical_name"])
+        .group_by("year", maintain_order=True)
+        .first()
+        .select(
+            "year",
+            "canonical_name",
+            "breakout_week",
+            "breakout_share_pct",
+            "breakout_active_days",
+            "weeks_until_second_important",
+        )
+    )
+
+    breakout_event_examples
+    return (breakout_event_examples,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The table shows one automatically selected example from each year, close to that year's typical breakout share. It gives us a small set of real labels to sanity-check without choosing convenient artists by hand.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 11. How sensitive is the rule?
+
+    We vary the main choices around the working rule. `working_events_kept_pct` shows how many of the **163** working breakout artists are still found under each alternative.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(breakout_events, dt, pl, weekly_artist_listening):
+    _weekly_history = weekly_artist_listening.collect()
+    _importance_cache = {}
+    _warmup_cache = {}
+
+    def _build_importance(_quantile, _lookback_days):
+        _cache_key = (_quantile, _lookback_days)
+        if _cache_key in _importance_cache:
+            return _importance_cache[_cache_key]
+
+        _rows = []
+        for _user_id in _weekly_history["user_id"].unique().to_list():
+            _user_history = _weekly_history.filter(
+                pl.col("user_id") == _user_id
+            )
+            _first_week = _user_history["week"].min()
+
+            for _week in _user_history["week"].unique().sort().to_list():
+                if (_week - _first_week).days < 365:
+                    continue
+
+                _past = _user_history.filter(pl.col("week") < _week)
+                if _lookback_days is not None:
+                    _past = _past.filter(
+                        pl.col("week")
+                        >= _week - dt.timedelta(days=_lookback_days)
+                    )
+
+                _rows.append(
+                    {
+                        "user_id": _user_id,
+                        "week": _week,
+                        "_cutoff": float(
+                            _past["artist_share_pct"].quantile(_quantile)
+                        ),
+                    }
+                )
+
+        _scored = (
+            _weekly_history
+            .join(
+                pl.DataFrame(_rows),
+                on=["user_id", "week"],
+                how="inner",
+                validate="m:1",
+            )
+            .with_columns(
+                (
+                    pl.col("artist_share_pct") >= pl.col("_cutoff")
+                ).alias("_is_important")
+            )
+        )
+        _importance_cache[_cache_key] = _scored
+        return _scored
+
+    def _warmup_established(_quantile, _followup_weeks, _extra_weeks):
+        _cache_key = (_quantile, _followup_weeks, _extra_weeks)
+        if _cache_key in _warmup_cache:
+            return _warmup_cache[_cache_key]
+
+        _first = (
+            _weekly_history
+            .group_by("user_id")
+            .agg(pl.col("week").min().alias("_first_week"))
+        )
+        _history = _weekly_history.join(
+            _first,
+            on="user_id",
+            how="left",
+            validate="m:1",
+        )
+        _warmup = _history.filter(
+            pl.col("week")
+            < pl.col("_first_week") + pl.duration(days=365)
+        )
+        _cutoff = (
+            _warmup
+            .group_by("user_id")
+            .agg(
+                pl.col("artist_share_pct")
+                .quantile(_quantile)
+                .alias("_cutoff")
+            )
+        )
+        _scored = (
+            _history
+            .join(
+                _cutoff,
+                on="user_id",
+                how="left",
+                validate="m:1",
+            )
+            .with_columns(
+                (
+                    pl.col("artist_share_pct") >= pl.col("_cutoff")
+                ).alias("_is_important")
+            )
+        )
+        _anchors = _scored.filter(
+            (
+                pl.col("week")
+                < pl.col("_first_week") + pl.duration(days=365)
+            )
+            & pl.col("_is_important")
+        )
+        _future = pl.concat(
+            [
+                _scored.select(
+                    "user_id",
+                    "artist_id",
+                    (
+                        pl.col("week")
+                        - dt.timedelta(days=7 * _weeks_ahead)
+                    ).alias("week"),
+                    pl.col("_is_important").alias("_future_important"),
+                )
+                for _weeks_ahead in range(1, _followup_weeks + 1)
+            ]
+        )
+        _established = (
+            _anchors
+            .join(
+                _future,
+                on=["user_id", "artist_id", "week"],
+                how="left",
+                validate="1:m",
+            )
+            .group_by("user_id", "artist_id", "week")
+            .agg(
+                pl.col("_future_important")
+                .fill_null(False)
+                .sum()
+                .alias("_extra_important_weeks")
+            )
+            .filter(
+                pl.col("_extra_important_weeks") >= _extra_weeks
+            )
+            .sort("week")
+            .group_by("user_id", "artist_id", maintain_order=True)
+            .first()
+        )
+        _warmup_cache[_cache_key] = _established
+        return _established
+
+    def _events_for(
+        _quantile,
+        _lookback_days,
+        _followup_weeks,
+        _extra_weeks,
+    ):
+        _scored = _build_importance(_quantile, _lookback_days)
+        _last = (
+            _scored
+            .group_by("user_id")
+            .agg(pl.col("week").max().alias("_last_week"))
+        )
+        _anchors = (
+            _scored
+            .filter(pl.col("_is_important"))
+            .join(
+                _last,
+                on="user_id",
+                how="left",
+                validate="m:1",
+            )
+            .filter(
+                pl.col("week")
+                <= pl.col("_last_week")
+                - dt.timedelta(days=7 * _followup_weeks)
+            )
+            .drop("_last_week")
+        )
+        _future = pl.concat(
+            [
+                _scored.select(
+                    "user_id",
+                    "artist_id",
+                    (
+                        pl.col("week")
+                        - dt.timedelta(days=7 * _weeks_ahead)
+                    ).alias("week"),
+                    pl.col("_is_important").alias("_future_important"),
+                )
+                for _weeks_ahead in range(1, _followup_weeks + 1)
+            ]
+        )
+        _events = (
+            _anchors
+            .join(
+                _future,
+                on=["user_id", "artist_id", "week"],
+                how="left",
+                validate="1:m",
+            )
+            .group_by("user_id", "artist_id", "week")
+            .agg(
+                pl.col("_future_important")
+                .fill_null(False)
+                .sum()
+                .alias("_extra_important_weeks")
+            )
+            .filter(
+                pl.col("_extra_important_weeks") >= _extra_weeks
+            )
+            .sort("week")
+            .group_by("user_id", "artist_id", maintain_order=True)
+            .first()
+        )
+        _already_established = _warmup_established(
+            _quantile,
+            _followup_weeks,
+            _extra_weeks,
+        )
+        return (
+            _events
+            .join(
+                _already_established.select("user_id", "artist_id"),
+                on=["user_id", "artist_id"],
+                how="anti",
+            )
+            .select("user_id", "artist_id")
+        )
+
+    _working = breakout_events.select("user_id", "artist_id")
+    _working_keys = set(_working.iter_rows())
+
+    _alternatives = [
+        ("Working rule", 0.90, 730, 2, 1),
+        ("12-month baseline", 0.90, 365, 2, 1),
+        ("All earlier history", 0.90, None, 2, 1),
+        ("Top 20% importance", 0.80, 730, 2, 1),
+        ("Top 5% importance", 0.95, 730, 2, 1),
+        ("2 important weeks within 2 weeks", 0.90, 730, 1, 1),
+        ("2 important weeks within 4 weeks", 0.90, 730, 3, 1),
+        ("2 important weeks within 5 weeks", 0.90, 730, 4, 1),
+        ("3 important weeks within 3 weeks", 0.90, 730, 2, 2),
+    ]
+
+    _sensitivity_rows = []
+    for _label, _quantile, _lookback, _followup, _extra in _alternatives:
+        _events = _events_for(
+            _quantile,
+            _lookback,
+            _followup,
+            _extra,
+        )
+        _keys = set(_events.iter_rows())
+        _sensitivity_rows.append(
+            {
+                "rule": _label,
+                "events": _events.height,
+                "working_events_kept_pct": round(
+                    len(_working_keys & _keys)
+                    / len(_working_keys)
+                    * 100,
+                    1,
+                ),
+            }
+        )
+
+    sensitivity_summary = pl.DataFrame(_sensitivity_rows)
+
+    sensitivity_summary
+    return (sensitivity_summary,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The rule is not very sensitive to the exact history window or whether the repetition period is two, three, four, or five weeks. The stricter **top 5%** level and requiring **three important weeks** remove far more events, which is expected because they change the meaning of breakout itself.
+
+    We will keep the **24-month baseline, top 10% importance, and two important weeks within three weeks** as the working definition and revisit these choices when we have evidence from more users.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 12. Working definition
+
+    A breakout is the artist's **first period with at least two important weeks within three weeks**, where importance means being in the user's strongest 10% of artist-weeks compared with up to the previous 24 months.
+
+    The breakout week is the first important week in that period. We only know that it qualifies once the second important week happens, which matters when we later turn this event into daily prediction labels.
+
+    This gives us the breakout event. The next phase is to define the daily prediction rows and candidate eligibility without leaking future information.
+    """)
     return
 
 
