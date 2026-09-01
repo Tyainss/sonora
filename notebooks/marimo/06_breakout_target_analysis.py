@@ -832,7 +832,7 @@ def _(mo):
     mo.md(r"""
     Some earlier listening makes follow-up more common: **24.3%** of artists with no activity in the previous 12 weeks appear in at least two of the next four, compared with **47.6%** after one prior week and **53.2%** after two or more.
 
-    But sudden adoption still happens. A breakout must allow both gradual buildup and a sharper jump.
+    But a breakout can still happen suddenly. The definition must allow both gradual buildup and a sharper jump.
 
     Earlier listening, even isolated strong periods, does not rule out a later first breakout. The artist only stops being eligible once an earlier period actually meets the final breakout rule.
     """)
@@ -1766,7 +1766,9 @@ def _(mo):
     - the first important week in the first qualifying period is the breakout week;
     - earlier weak listening and isolated strong weeks are allowed.
 
-    For the uncertain first year of listening history, we do not assign breakout dates. Artists that already show the same repeated-important pattern there are treated as already established.
+    For this dataset, we do not assign breakout dates during the uncertain first year. Artists that already show the same repeated-important pattern there are treated as pre-existing for this analysis.
+
+    This does not make 12 months a requirement for future users. How to handle limited listening history in production remains open.
     """)
     return
 
@@ -2067,51 +2069,6 @@ def _(mo):
     The working rule leaves **163 breakout events** after the first-year analysis period.
     """)
     return
-
-
-@app.cell
-def _(breakout_events, pl):
-    breakout_event_examples = (
-        breakout_events
-        .with_columns(
-            pl.col("breakout_week").dt.year().alias("year"),
-            pl.col("breakout_share_pct")
-            .median()
-            .over(pl.col("breakout_week").dt.year())
-            .alias("_year_median_share"),
-        )
-        .with_columns(
-            (
-                pl.col("breakout_share_pct")
-                - pl.col("_year_median_share")
-            )
-            .abs()
-            .alias("_share_distance")
-        )
-        .sort(["year", "_share_distance", "canonical_name"])
-        .group_by("year", maintain_order=True)
-        .first()
-        .select(
-            "year",
-            "canonical_name",
-            "breakout_week",
-            "breakout_share_pct",
-            "breakout_active_days",
-            "weeks_until_second_important",
-        )
-    )
-
-    breakout_event_examples
-    return (breakout_event_examples,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    The table shows one automatically selected example from each year, close to that year's typical breakout share. It gives us a small set of real labels to sanity-check without choosing convenient artists by hand.
-    """)
-    return
-
 
 @app.cell(hide_code=True)
 def _(mo):
