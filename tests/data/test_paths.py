@@ -28,3 +28,7 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     assert paths.curated_listening_events == (
         tmp_path / "sonora-data/curated/listening_events.parquet"
     )
+    assert paths.breakout_dir == tmp_path / "sonora-data/processed/breakout"
+    assert paths.breakout_events == paths.breakout_dir / "first_breakout_events.parquet"
+    assert paths.daily_breakout_targets == paths.breakout_dir / "daily_targets.parquet"
+    assert paths.breakout_build_metadata == paths.breakout_dir / "build_metadata.json"
