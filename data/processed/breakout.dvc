@@ -1,0 +1,6 @@
+outs:
+- md5: dddd97f4133204fc90304cf111e77ae3.dir
+  size: 616277
+  nfiles: 3
+  hash: md5
+  path: breakout
