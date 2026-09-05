@@ -24,6 +24,7 @@ def _(mo):
 @app.cell
 def _():
     import datetime as dt
+
     import altair as alt
     import polars as pl
 

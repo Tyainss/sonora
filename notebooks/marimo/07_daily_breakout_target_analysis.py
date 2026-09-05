@@ -7,15 +7,24 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import datetime as dt
-    from collections import deque
 
     import marimo as mo
     import polars as pl
 
+    from sonora.breakout import (
+        DEFAULT_HORIZON_DAYS,
+        DEFAULT_RECENCY_DAYS,
+        aggregate_daily_listening,
+        build_listening_gaps,
+        detect_first_breakouts,
+        eligible_segments,
+        historical_user_bounds,
+        make_daily_targets,
+    )
     from sonora.data.paths import DEFAULT_DATA_PATHS
 
     paths = DEFAULT_DATA_PATHS
-    return deque, dt, mo, paths, pl
+    return DEFAULT_HORIZON_DAYS, DEFAULT_RECENCY_DAYS, aggregate_daily_listening, historical_user_bounds, detect_first_breakouts, eligible_segments, build_listening_gaps, make_daily_targets, dt, mo, paths, pl
 
 
 @app.cell(hide_code=True)
@@ -38,48 +47,12 @@ def _(paths, pl):
 
 
 @app.cell
-def _(listening_events, pl):
-    daily_user_listening = (
-        listening_events
-        .with_columns(pl.col("listened_at").dt.date().alias("date"))
-        .group_by("user_id", "date")
-        .agg(pl.len().alias("user_scrobbles"))
-        .collect()
-    )
+def _(aggregate_daily_listening, historical_user_bounds, listening_events, pl):
+    daily_user_listening, daily_artist_listening = aggregate_daily_listening(listening_events)
+    user_limits = historical_user_bounds(daily_user_listening)
+    first_artist_listens = daily_artist_listening.group_by("user_id", "artist_id").agg(pl.col("date").min().alias("first_listen_date"))
+    return daily_artist_listening, daily_user_listening, first_artist_listens, user_limits
 
-    daily_artist_listening = (
-        listening_events
-        .with_columns(pl.col("listened_at").dt.date().alias("date"))
-        .group_by("user_id", "artist_id", "date")
-        .agg(pl.len().alias("artist_scrobbles"))
-        .collect()
-    )
-
-    user_limits = (
-        daily_user_listening
-        .group_by("user_id")
-        .agg(
-            pl.col("date").min().alias("first_date"),
-            pl.col("date").max().alias("last_observed_date"),
-        )
-        .with_columns(
-            (
-                pl.col("last_observed_date") - pl.duration(days=1)
-            ).alias("last_complete_date")
-        )
-    )
-
-    first_artist_listens = (
-        daily_artist_listening
-        .group_by("user_id", "artist_id")
-        .agg(pl.col("date").min().alias("first_listen_date"))
-    )
-    return (
-        daily_artist_listening,
-        daily_user_listening,
-        first_artist_listens,
-        user_limits,
-    )
 
 
 @app.cell(hide_code=True)
@@ -89,7 +62,7 @@ def _(mo):
 
     ### Calendar-week boundary
 
-    A calendar week can split a run of listening across two weeks. Starting the week on different days shows how much that changes the detected breakouts. Monday–Sunday weeks provide the comparison point.
+    A calendar week can split a run of listening across two weeks. Starting the week on different days shows how much that changes the detected breakouts. Mondayâ€“Sunday weeks provide the comparison point.
     """)
     return
 
@@ -498,390 +471,35 @@ def _(mo):
 
     A rolling period can start on any day. The comparison covers calendar weeks, **rolling 7-day periods**, and **rolling 5-day periods**.
 
-    For 7-day periods, a breakout needs two important periods whose starts are 7–14 days apart. They cannot overlap, and together they fit within 21 days.
+    For 7-day periods, a breakout needs two important periods whose starts are 7â€“14 days apart. They cannot overlap, and together they fit within 21 days.
     """)
     return
 
 
-@app.cell
-def _(artists, deque, dt, pl):
-    def build_rolling_events(
-        daily_user,
-        daily_artist,
-        user_limits_data,
-        period_days,
-        min_active_days=1,
-    ):
-        _expanded_user = pl.concat(
-            [
-                daily_user.select(
-                    "user_id",
-                    (
-                        pl.col("date") + pl.duration(days=_offset)
-                    ).alias("window_end"),
-                    "user_scrobbles",
-                )
-                for _offset in range(period_days)
-            ]
-        )
 
-        _rolling_user = (
-            _expanded_user
-            .group_by("user_id", "window_end")
-            .agg(pl.col("user_scrobbles").sum())
-            .join(
-                user_limits_data,
-                on="user_id",
-                how="left",
-                validate="m:1",
-            )
-            .with_columns(
-                (
-                    pl.col("window_end")
-                    - pl.duration(days=period_days - 1)
-                ).alias("window_start")
-            )
-            .filter(
-                (pl.col("window_start") >= pl.col("first_date"))
-                & (
-                    pl.col("window_end")
-                    <= pl.col("last_complete_date")
-                )
-            )
-            .drop("first_date", "last_observed_date", "last_complete_date")
-        )
-
-        _expanded_artist = pl.concat(
-            [
-                daily_artist.select(
-                    "user_id",
-                    "artist_id",
-                    "date",
-                    (
-                        pl.col("date") + pl.duration(days=_offset)
-                    ).alias("window_end"),
-                    "artist_scrobbles",
-                )
-                for _offset in range(period_days)
-            ]
-        )
-
-        _windows = (
-            _expanded_artist
-            .group_by("user_id", "artist_id", "window_end")
-            .agg(
-                pl.col("artist_scrobbles").sum(),
-                pl.col("date").n_unique().alias("active_days"),
-            )
-            .join(
-                _rolling_user,
-                on=["user_id", "window_end"],
-                how="inner",
-                validate="m:1",
-            )
-            .with_columns(
-                (
-                    pl.col("window_end")
-                    - pl.duration(days=period_days - 1)
-                ).alias("window_start"),
-                (
-                    pl.col("artist_scrobbles")
-                    / pl.col("user_scrobbles")
-                    * 100
-                )
-                .round(2)
-                .alias("artist_share_pct"),
-            )
-            .join(artists, on="artist_id", how="left", validate="m:1")
-            .join(
-                user_limits_data.select("user_id", "first_date"),
-                on="user_id",
-                how="left",
-                validate="m:1",
-            )
-        )
-
-        _cutoff_rows = []
-        for _user_id in _windows["user_id"].unique().to_list():
-            _user_windows = _windows.filter(
-                pl.col("user_id") == _user_id
-            )
-            _first_date = _user_windows["first_date"][0]
-            _candidate_min_end = _first_date + dt.timedelta(
-                days=365 + period_days - 1
-            )
-
-            _by_date = (
-                _user_windows
-                .select(
-                    "window_end",
-                    (
-                        pl.col("artist_share_pct") * 100
-                    )
-                    .round(0)
-                    .cast(pl.Int16)
-                    .alias("_share_cents"),
-                )
-                .group_by("window_end")
-                .agg(pl.col("_share_cents").alias("_shares"))
-                .sort("window_end")
-            )
-
-            _date_rows = list(_by_date.iter_rows(named=True))
-            _hist = [0] * 10001
-            _active_dates = deque()
-            _total = 0
-            _add_index = 0
-
-            for _target_date in [
-                _row["window_end"]
-                for _row in _date_rows
-                if _row["window_end"] >= _candidate_min_end
-            ]:
-                while (
-                    _add_index < len(_date_rows)
-                    and _date_rows[_add_index]["window_end"] < _target_date
-                ):
-                    _row = _date_rows[_add_index]
-                    _counts = {}
-                    for _value in _row["_shares"]:
-                        _value = int(_value)
-                        _counts[_value] = _counts.get(_value, 0) + 1
-                    for _value, _count in _counts.items():
-                        _hist[_value] += _count
-                    _row_count = len(_row["_shares"])
-                    _total += _row_count
-                    _active_dates.append(
-                        (_row["window_end"], _counts, _row_count)
-                    )
-                    _add_index += 1
-
-                _lower_date = _target_date - dt.timedelta(days=730)
-                while (
-                    _active_dates
-                    and _active_dates[0][0] < _lower_date
-                ):
-                    _, _counts, _row_count = _active_dates.popleft()
-                    for _value, _count in _counts.items():
-                        _hist[_value] -= _count
-                    _total -= _row_count
-
-                _rank = round(0.90 * (_total - 1))
-                _seen = 0
-                _cutoff_cents = 0
-                for _value, _count in enumerate(_hist):
-                    _seen += _count
-                    if _seen > _rank:
-                        _cutoff_cents = _value
-                        break
-
-                _cutoff_rows.append(
-                    {
-                        "user_id": _user_id,
-                        "window_end": _target_date,
-                        "top_10_cutoff": _cutoff_cents / 100,
-                    }
-                )
-
-        _importance = (
-            _windows
-            .join(
-                pl.DataFrame(_cutoff_rows),
-                on=["user_id", "window_end"],
-                how="inner",
-                validate="m:1",
-            )
-            .with_columns(
-                (
-                    pl.col("artist_share_pct")
-                    >= pl.col("top_10_cutoff")
-                ).alias("is_important")
-            )
-        )
-
-        _important = _importance.filter(
-            pl.col("is_important")
-            & (pl.col("active_days") >= min_active_days)
-        )
-
-        _future = pl.concat(
-            [
-                _important.select(
-                    "user_id",
-                    "artist_id",
-                    (
-                        pl.col("window_end")
-                        - pl.duration(days=_days_ahead)
-                    ).alias("window_end"),
-                    pl.col("window_end").alias("_second_window_end"),
-                )
-                for _days_ahead in range(period_days, 2 * period_days + 1)
-            ]
-        )
-
-        _candidates = (
-            _important
-            .join(
-                _future,
-                on=["user_id", "artist_id", "window_end"],
-                how="inner",
-                validate="1:m",
-            )
-            .sort("window_end", "_second_window_end")
-            .group_by("user_id", "artist_id", maintain_order=True)
-            .first()
-        )
-
-        _warmup_cutoffs = (
-            _windows
-            .filter(
-                pl.col("window_start")
-                < pl.col("first_date") + pl.duration(days=365)
-            )
-            .group_by("user_id")
-            .agg(
-                pl.col("artist_share_pct")
-                .quantile(0.90)
-                .alias("_warmup_cutoff")
-            )
-        )
-
-        _warmup_scored = (
-            _windows
-            .join(
-                _warmup_cutoffs,
-                on="user_id",
-                how="left",
-                validate="m:1",
-            )
-            .with_columns(
-                (
-                    pl.col("artist_share_pct")
-                    >= pl.col("_warmup_cutoff")
-                ).alias("_warmup_important")
-            )
-        )
-
-        _warmup_important = _warmup_scored.filter(
-            pl.col("_warmup_important")
-            & (pl.col("active_days") >= min_active_days)
-        )
-
-        _warmup_anchors = _warmup_important.filter(
-            pl.col("window_start")
-            < pl.col("first_date") + pl.duration(days=365)
-        )
-
-        _warmup_future = pl.concat(
-            [
-                _warmup_important.select(
-                    "user_id",
-                    "artist_id",
-                    (
-                        pl.col("window_end")
-                        - pl.duration(days=_days_ahead)
-                    ).alias("window_end"),
-                    pl.col("window_end").alias("_second_window_end"),
-                )
-                for _days_ahead in range(period_days, 2 * period_days + 1)
-            ]
-        )
-
-        _warmup_established = (
-            _warmup_anchors
-            .join(
-                _warmup_future,
-                on=["user_id", "artist_id", "window_end"],
-                how="inner",
-                validate="1:m",
-            )
-            .sort("window_end", "_second_window_end")
-            .group_by("user_id", "artist_id", maintain_order=True)
-            .first()
-            .select(
-                "user_id",
-                "artist_id",
-                "canonical_name",
-                pl.col("window_start").alias("established_period_start"),
-            )
-        )
-
-        _events = (
-            _candidates
-            .join(
-                _warmup_established.select("user_id", "artist_id"),
-                on=["user_id", "artist_id"],
-                how="anti",
-            )
-            .with_columns(
-                pl.col("window_start").alias("breakout_period_start"),
-                pl.col("window_end").alias("first_important_period_end"),
-                (
-                    pl.col("_second_window_end")
-                    - pl.duration(days=period_days - 1)
-                ).alias("second_important_period_start"),
-                (
-                    pl.col("_second_window_end") + pl.duration(days=1)
-                ).alias("confirmation_date"),
-                pl.col("artist_share_pct").alias("first_share_pct"),
-                pl.col("active_days").alias("first_active_days"),
-            )
-        )
-
-        _second_stats = _windows.select(
-            "user_id",
-            "artist_id",
-            pl.col("window_end").alias("_second_window_end"),
-            pl.col("active_days").alias("second_active_days"),
-        )
-
-        _events = (
-            _events
-            .join(
-                _second_stats,
-                on=["user_id", "artist_id", "_second_window_end"],
-                how="left",
-                validate="1:1",
-            )
-            .select(
-                "user_id",
-                "artist_id",
-                "canonical_name",
-                "breakout_period_start",
-                "first_important_period_end",
-                "second_important_period_start",
-                "confirmation_date",
-                "first_share_pct",
-                "first_active_days",
-                "second_active_days",
-            )
-            .sort("breakout_period_start")
-        )
-
-        return _windows, _importance, _warmup_established, _events
-
-    return (build_rolling_events,)
 
 
 @app.cell
 def _(
-    build_rolling_events,
+    detect_first_breakouts,
     daily_artist_listening,
     daily_user_listening,
     user_limits,
 ):
-    _, _, rolling_7_warmup_established, rolling_7_breakout_events = build_rolling_events(
+    rolling_7_breakout_events, rolling_7_warmup_established = detect_first_breakouts(
         daily_user_listening,
         daily_artist_listening,
         user_limits,
         period_days=7,
+        min_active_days=1,
     )
 
-    _, _, rolling_5_warmup_established, rolling_5_breakout_events = build_rolling_events(
+    rolling_5_breakout_events, rolling_5_warmup_established = detect_first_breakouts(
         daily_user_listening,
         daily_artist_listening,
         user_limits,
         period_days=5,
+        min_active_days=1,
     )
     return (
         rolling_5_breakout_events,
@@ -907,7 +525,7 @@ def _(
 
     _method_inputs = [
         (
-            "Fixed Monday–Sunday 7 days",
+            "Fixed Mondayâ€“Sunday 7 days",
             fixed_breakout_events,
             fixed_warmup_established,
         ),
@@ -970,12 +588,12 @@ def _(mo):
 
 @app.cell
 def _(
-    build_rolling_events,
+    detect_first_breakouts,
     daily_artist_listening,
     daily_user_listening,
     user_limits,
 ):
-    _, _, rolling_7_2day_warmup_established, rolling_7_2day_breakout_events = build_rolling_events(
+    rolling_7_2day_breakout_events, rolling_7_2day_warmup_established = detect_first_breakouts(
         daily_user_listening,
         daily_artist_listening,
         user_limits,
@@ -983,7 +601,7 @@ def _(
         min_active_days=2,
     )
 
-    _, _, rolling_7_3day_warmup_established, rolling_7_3day_breakout_events = build_rolling_events(
+    rolling_7_3day_breakout_events, rolling_7_3day_warmup_established = detect_first_breakouts(
         daily_user_listening,
         daily_artist_listening,
         user_limits,
@@ -1078,8 +696,8 @@ def _(mo):
 
 
 @app.cell
-def _(rolling_7_2day_breakout_events):
-    working_breakout_events = rolling_7_2day_breakout_events
+def _(artists, rolling_7_2day_breakout_events):
+    working_breakout_events = rolling_7_2day_breakout_events.join(artists, on="artist_id", how="left", validate="m:1")
     return (working_breakout_events,)
 
 
@@ -1185,9 +803,9 @@ def _(pl, working_breakout_events):
 
 
 @app.cell
-def _():
-    selected_recency_days = 90
-    selected_horizon_days = 60
+def _(DEFAULT_HORIZON_DAYS, DEFAULT_RECENCY_DAYS):
+    selected_recency_days = DEFAULT_RECENCY_DAYS
+    selected_horizon_days = DEFAULT_HORIZON_DAYS
     return selected_horizon_days, selected_recency_days
 
 
@@ -1218,7 +836,7 @@ def _(pl, user_limits, working_breakout_events):
     comparison_limits = (
         user_limits.select(
             "user_id",
-            (pl.col("first_date") + pl.duration(days=386)).alias("score_start"),
+            "score_start",
             (pl.col("last_complete_date") + pl.duration(days=1)).alias("known_confirmation_through"),
         )
         .with_columns(
@@ -1249,42 +867,14 @@ def _(pl, user_limits, working_breakout_events):
 
 
 @app.cell
-def _(
-    comparison_limits, daily_artist_listening, pl,
-    rolling_7_2day_warmup_established, working_breakout_events,
-):
-    listening_gaps = (
-        daily_artist_listening
-        .with_columns(
-            pl.col("date").shift(-1).over(["user_id", "artist_id"], order_by="date").alias("next_listen")
-        )
-        .join(
-            rolling_7_2day_warmup_established.select("user_id", "artist_id"),
-            on=["user_id", "artist_id"], how="anti",
-        )
-        .join(
-            working_breakout_events.select("user_id", "artist_id", "confirmation_date"),
-            on=["user_id", "artist_id"], how="left", validate="m:1",
-        )
-        .join(comparison_limits, on="user_id", validate="m:1")
-    )
+def _(build_listening_gaps, daily_artist_listening, pl, user_limits,
+      rolling_7_2day_warmup_established, working_breakout_events):
+    listening_gaps = build_listening_gaps(
+        daily_artist_listening, working_breakout_events,
+        rolling_7_2day_warmup_established, user_limits,
+    ).with_columns((pl.col("known_confirmation_through") - pl.duration(days=60)).alias("score_end"))
+    return (listening_gaps,)
 
-    def eligible_segments(gaps, recency_days):
-        # Split at the next listen so each artist-day is counted once.
-        return (
-            gaps.with_columns(
-                pl.max_horizontal(
-                    pl.col("date") + pl.duration(days=1), "score_start",
-                ).alias("eligible_start"),
-                pl.min_horizontal(
-                    pl.col("date") + pl.duration(days=recency_days),
-                    "next_listen", pl.col("confirmation_date") - pl.duration(days=1),
-                    "score_end",
-                ).alias("eligible_end"),
-            )
-            .filter(pl.col("eligible_start") <= pl.col("eligible_end"))
-        )
-    return eligible_segments, listening_gaps
 
 
 @app.cell
@@ -1603,6 +1193,75 @@ def _(mo, selected_horizon_days, selected_recency_days):
 
     Artists can return after inactivity with their earlier history intact. First breakout confirmation ends eligibility permanently. The same rule applies to every user.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 5. Daily target dataset
+
+    Each row is an eligible artist on a scoring date. A target of **true** means the first breakout is confirmed within the following 60 days. **False** means those 60 days are complete without a confirmation. An empty target means the outcome is still unknown.
+
+    Recent rows stay in the dataset. A confirmed outcome can already be true even when the full 60 days are not available. Training uses only rows with a full 60 days of follow-up.
+    """)
+    return
+
+
+
+
+
+@app.cell
+def _(
+    daily_artist_listening, make_daily_targets, pl,
+    rolling_7_2day_warmup_established, selected_horizon_days,
+    selected_recency_days, user_limits, working_breakout_events,
+):
+    dataset_bounds = user_limits
+    daily_targets = make_daily_targets(
+        daily_artist_listening, working_breakout_events, rolling_7_2day_warmup_established,
+        dataset_bounds, recency_days=selected_recency_days, horizon_days=selected_horizon_days,
+    ).collect(engine="streaming")
+    return daily_targets, dataset_bounds
+
+
+@app.cell
+def _(daily_targets, pl):
+    _rows = []
+    for _user in daily_targets["user_id"].unique().sort():
+        _user_rows = daily_targets.filter(pl.col("user_id") == _user)
+        for _label, _rows_to_count in [
+            ("All eligible days", _user_rows),
+            ("Full 60-day follow-up", _user_rows.filter(pl.col("has_full_horizon"))),
+            ("Recent dates", _user_rows.filter(~pl.col("has_full_horizon"))),
+        ]:
+            _rows.append({
+                "User": _user, "Rows": _label, "Total": _rows_to_count.height,
+                "Yes": _rows_to_count["target_60d"].sum(),
+                "No": _rows_to_count.filter(pl.col("target_60d").eq(False)).height,
+                "Unknown": _rows_to_count["target_60d"].null_count(),
+            })
+    daily_target_summary = pl.DataFrame(_rows)
+    daily_target_summary
+    return (daily_target_summary,)
+
+
+@app.cell
+def _(artists, daily_targets, pl, timeline_examples):
+    _names = [example["artist"] for example in timeline_examples]
+    _examples = daily_targets.join(artists.select("artist_id", "canonical_name"), on="artist_id", validate="m:1").filter(pl.col("canonical_name").is_in(_names))
+    daily_target_examples = (
+        pl.concat([
+            _examples.group_by("user_id", "artist_id", maintain_order=True).head(3),
+            _examples.group_by("user_id", "artist_id", maintain_order=True).tail(3),
+        ]).unique().sort("user_id", "canonical_name", "scoring_date")
+        .select("user_id", "canonical_name", "scoring_date", "last_listen_date", "target_60d", "has_full_horizon")
+    )
+    daily_target_examples.rename({
+        "user_id": "User", "canonical_name": "Artist", "scoring_date": "Scoring date",
+        "last_listen_date": "Latest known listen", "target_60d": "Confirmed within 60 days",
+        "has_full_horizon": "Full follow-up",
+    })
     return
 
 
