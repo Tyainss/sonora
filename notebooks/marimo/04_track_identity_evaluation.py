@@ -44,24 +44,6 @@ def _():
     )
 
 
-@app.cell
-def _(mo, paths):
-    _required_paths = [
-        paths.listening_events_clean,
-        paths.curated_artists,
-        paths.curated_artist_aliases,
-    ]
-    _missing_paths = [path for path in _required_paths if not path.is_file()]
-    mo.stop(
-        bool(_missing_paths),
-        mo.callout(
-            "Missing required datasets: "
-            + ", ".join(f"`{path}`" for path in _missing_paths),
-            kind="danger",
-        ),
-    )
-    return
-
 
 @app.cell
 def _(normalize_for_comparison, paths, pl):

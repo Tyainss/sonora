@@ -52,5 +52,21 @@ class DataPaths:
     def curated_listening_events(self) -> Path:
         return self.curated_dir / "listening_events.parquet"
 
+    @property
+    def breakout_dir(self) -> Path:
+        return self.data_dir / "processed" / "breakout"
+
+    @property
+    def breakout_events(self) -> Path:
+        return self.breakout_dir / "first_breakout_events.parquet"
+
+    @property
+    def daily_breakout_targets(self) -> Path:
+        return self.breakout_dir / "daily_targets.parquet"
+
+    @property
+    def breakout_build_metadata(self) -> Path:
+        return self.breakout_dir / "build_metadata.json"
+
 
 DEFAULT_DATA_PATHS = DataPaths()

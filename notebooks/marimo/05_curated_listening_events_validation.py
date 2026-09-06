@@ -40,27 +40,6 @@ def _():
     return EXPECTED_COLUMNS, build_curated_listening_events, paths, pl
 
 
-@app.cell
-def _(mo, paths):
-    _required_paths = [
-        paths.listening_events_clean,
-        paths.curated_artists,
-        paths.curated_artist_aliases,
-        paths.curated_tracks,
-        paths.curated_track_aliases,
-    ]
-    _missing_paths = [path for path in _required_paths if not path.is_file()]
-    mo.stop(
-        bool(_missing_paths),
-        mo.callout(
-            "Missing required datasets: "
-            + ", ".join(f"`{path}`" for path in _missing_paths),
-            kind="danger",
-        ),
-    )
-    return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
