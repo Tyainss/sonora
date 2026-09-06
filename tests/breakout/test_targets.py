@@ -176,6 +176,16 @@ def synthetic_history():
     return users, artists
 
 
+def history_with_target_days(target_days):
+    rows = [("a", str(a), day(n), 1) for a in range(10) for n in range(101)]
+    rows += [("a", "target", day(n), 100) for n in target_days]
+    artists = artist_days(rows)
+    users = artists.group_by("user_id", "date").agg(
+        pl.col("artist_scrobbles").sum().alias("user_scrobbles")
+    )
+    return users, artists
+
+
 def test_completed_second_period_confirms_immediately_and_only_once():
     users, artists = synthetic_history()
     events, _ = detect_first_breakouts(users, artists, bounds(end=54))
@@ -194,6 +204,31 @@ def test_completed_second_period_confirms_immediately_and_only_once():
         "a",
         "b",
     }
+
+
+def test_warmup_established_artist_never_gets_later_first_breakout():
+    users, artists = history_with_target_days([1, 3, 8, 10, 45, 47, 52, 54])
+
+    events, established = detect_first_breakouts(users, artists, bounds(("a",), 100))
+
+    assert established.filter(pl.col("artist_id") == "target").height == 1
+    assert events.filter(pl.col("artist_id") == "target").is_empty()
+
+
+def test_repeated_periods_require_non_overlap_and_allow_up_to_14_day_gap():
+    overlapping_users, overlapping_artists = history_with_target_days([45, 47, 48])
+    edge_users, edge_artists = history_with_target_days([45, 47, 59, 61])
+    late_users, late_artists = history_with_target_days([45, 47, 64, 66])
+
+    overlapping, _ = detect_first_breakouts(
+        overlapping_users, overlapping_artists, bounds(("a",), 80)
+    )
+    edge, _ = detect_first_breakouts(edge_users, edge_artists, bounds(("a",), 80))
+    late, _ = detect_first_breakouts(late_users, late_artists, bounds(("a",), 80))
+
+    assert overlapping.filter(pl.col("artist_id") == "target").is_empty()
+    assert edge.filter(pl.col("artist_id") == "target").height == 1
+    assert late.filter(pl.col("artist_id") == "target").is_empty()
 
 
 def test_empty_and_short_histories_keep_output_types():

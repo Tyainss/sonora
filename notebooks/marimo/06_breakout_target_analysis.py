@@ -2353,7 +2353,7 @@ def _(mo):
     mo.md(r"""
     The rule is not very sensitive to the exact history window or whether the repetition period is two, three, four, or five weeks. The stricter **top 5%** level and requiring **three important weeks** remove far more events, which is expected because they change the meaning of breakout itself.
 
-    We will keep the **24-month baseline, top 10% importance, and two important weeks within three weeks** as the working definition and revisit these choices when we have evidence from more users.
+    The **24-month baseline, top 10% importance, and two important weeks within three weeks** provide the working weekly representation carried into the daily-target refinement.
     """)
     return
 
@@ -2361,13 +2361,11 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 12. Working definition
+    ## 12. Behavioural definition carried forward
 
-    A breakout is the artist's **first period with at least two important weeks within three weeks**, where importance means being in the user's strongest 10% of artist-weeks compared with up to the previous 24 months.
+    This analysis establishes breakout as the artist's **first period of repeated importance**, using the working weekly representation of at least two important weeks within three weeks. Importance means being in the user's strongest 10% of artist-weeks compared with up to the previous 24 months.
 
-    The breakout week is the first important week in that period. We only know that it qualifies once the second important week happens, which matters when we later turn this event into daily prediction labels.
-
-    This gives us the breakout event. The next phase is to define the daily prediction rows and candidate eligibility without leaking future information.
+    The first important period is retrospective: the breakout only becomes knowable once the second important period occurs. Notebook 07 keeps this behavioural concept, replaces fixed calendar weeks with rolling 7-day periods, and defines the point-in-time daily target.
     """)
     return
 

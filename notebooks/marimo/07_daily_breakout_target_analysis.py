@@ -7,6 +7,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import datetime as dt
+    import json
 
     import marimo as mo
     import polars as pl
@@ -24,7 +25,7 @@ def _():
     from sonora.data.paths import DEFAULT_DATA_PATHS
 
     paths = DEFAULT_DATA_PATHS
-    return DEFAULT_HORIZON_DAYS, DEFAULT_RECENCY_DAYS, aggregate_daily_listening, historical_user_bounds, detect_first_breakouts, eligible_segments, build_listening_gaps, make_daily_targets, dt, mo, paths, pl
+    return DEFAULT_HORIZON_DAYS, DEFAULT_RECENCY_DAYS, aggregate_daily_listening, historical_user_bounds, detect_first_breakouts, eligible_segments, build_listening_gaps, make_daily_targets, dt, json, mo, paths, pl
 
 
 @app.cell(hide_code=True)
@@ -47,9 +48,15 @@ def _(paths, pl):
 
 
 @app.cell
-def _(aggregate_daily_listening, historical_user_bounds, listening_events, pl):
+def _(aggregate_daily_listening, dt, historical_user_bounds, json, listening_events, paths, pl):
     daily_user_listening, daily_artist_listening = aggregate_daily_listening(listening_events)
-    user_limits = historical_user_bounds(daily_user_listening)
+    export_metadata = json.loads(paths.raw_lastfm_integrity.read_text(encoding="utf-8"))
+    export_cutoff = dt.datetime.fromtimestamp(export_metadata["to_unix"], dt.UTC)
+    last_complete_date = export_cutoff.date() - dt.timedelta(days=1)
+    user_limits = historical_user_bounds(
+        daily_user_listening,
+        last_complete_date=last_complete_date,
+    )
     first_artist_listens = daily_artist_listening.group_by("user_id", "artist_id").agg(pl.col("date").min().alias("first_listen_date"))
     return daily_artist_listening, daily_user_listening, first_artist_listens, user_limits
 
@@ -1203,7 +1210,7 @@ def _(mo):
 
     Each row is an eligible artist on a scoring date. A target of **true** means the first breakout is confirmed within the following 60 days. **False** means those 60 days are complete without a confirmation. An empty target means the outcome is still unknown.
 
-    Recent rows stay in the dataset. A confirmed outcome can already be true even when the full 60 days are not available. Training uses only rows with a full 60 days of follow-up.
+    Recent rows stay in the dataset. A confirmed outcome can already be true even when the full 60 days are not available. Training uses only rows with a full 60 days of follow-up. The observation boundary comes from verified export coverage rather than the user's latest listen, so known no-listening days remain observed inactivity rather than missing data.
     """)
     return
 

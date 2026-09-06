@@ -1,5 +1,7 @@
 """Daily listening counts and explicit history limits for breakout analysis."""
 
+from datetime import date
+
 import polars as pl
 
 BOUND_COLUMNS = (
@@ -29,7 +31,9 @@ def aggregate_daily_listening(
     )
 
 
-def historical_user_bounds(daily_user: pl.DataFrame) -> pl.DataFrame:
+def historical_user_bounds(
+    daily_user: pl.DataFrame, *, last_complete_date: date
+) -> pl.DataFrame:
     """Apply the historical study's first-year exclusion and 21-day buffer.
 
     This is an analysis preset, not a production rule for users with short
@@ -37,16 +41,11 @@ def historical_user_bounds(daily_user: pl.DataFrame) -> pl.DataFrame:
     """
     return (
         daily_user.group_by("user_id")
-        .agg(
-            pl.col("date").min().alias("first_date"),
-            pl.col("date").max().alias("last_observed_date"),
-        )
+        .agg(pl.col("date").min().alias("first_date"))
         .with_columns(
             (pl.col("first_date") + pl.duration(days=365)).alias("warmup_end"),
             (pl.col("first_date") + pl.duration(days=386)).alias("score_start"),
-            (pl.col("last_observed_date") - pl.duration(days=1)).alias(
-                "last_complete_date"
-            ),
+            pl.lit(last_complete_date).cast(pl.Date).alias("last_complete_date"),
         )
         .sort("user_id")
     )
@@ -63,14 +62,16 @@ def validate_user_bounds(bounds: pl.DataFrame, *, period_days: int = 7) -> None:
     if any(bounds.schema[column] != pl.Date for column in BOUND_COLUMNS[1:]):
         raise ValueError("User bounds must use Date columns")
     if bounds.filter(
-        (pl.col("warmup_end") <= pl.col("first_date"))
+        (pl.col("last_complete_date") < pl.col("first_date"))
+        | (pl.col("warmup_end") <= pl.col("first_date"))
         | (
             pl.col("score_start")
             < pl.col("warmup_end") + pl.duration(days=3 * period_days)
         )
     ).height:
         raise ValueError(
-            "Scoring must start after the initial history period and its full follow-up"
+            "History must end on or after its first day, and scoring must start "
+            "after the initial history period and its full follow-up"
         )
 
 

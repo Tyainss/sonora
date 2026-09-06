@@ -47,20 +47,13 @@ def build_breakout_targets(
     )
     if set(daily_user["user_id"]) != set(user_bounds["user_id"]):
         raise ValueError("Bounds must cover exactly the users in the listening data")
-    observed = daily_user.group_by("user_id").agg(
-        pl.col("date").min().alias("_first"), pl.col("date").max().alias("_latest")
-    )
+    observed = daily_user.group_by("user_id").agg(pl.col("date").min().alias("_first"))
     if (
         user_bounds.join(observed, on="user_id")
-        .filter(
-            (pl.col("first_date") != pl.col("_first"))
-            | (pl.col("last_complete_date") >= pl.col("_latest"))
-        )
+        .filter(pl.col("first_date") != pl.col("_first"))
         .height
     ):
-        raise ValueError(
-            "Bounds must preserve the first observed day and end before the latest listen"
-        )
+        raise ValueError("Bounds must preserve the first observed listening day")
     events, established = detect_first_breakouts(daily_user, daily_artist, user_bounds)
     targets = make_daily_targets(daily_artist, events, established, user_bounds)
     paths.breakout_dir.mkdir(parents=True, exist_ok=True)
