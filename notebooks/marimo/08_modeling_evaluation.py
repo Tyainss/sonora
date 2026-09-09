@@ -37,11 +37,9 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Modelling evaluation framework
+    # Modelling evaluation analysis
 
-    This notebook validates the common evaluation protocol against the saved Sonora data. Reusable logic lives in `sonora.breakout.evaluation`.
-
-    The smoke-test score below is synthetic and has **no modelling meaning**. It provides a complete daily ordering only to exercise the ranking, event, and daily-metric contracts.
+    Before comparing baselines or models, we need to make sure the historical comparison is fair: training must not use future outcomes too early, scoring must cover the expected dates, and breakouts should only count as misses when Sonora had a real chance to find them.
     """)
     return
 
@@ -64,12 +62,14 @@ def _(
     built_users = [user for user in metadata["users"] if user["status"] == "built"]
     if len(built_users) != 1:
         raise ValueError("This validation notebook expects one built user")
+
     user_metadata = built_users[0]
     evaluation_user_id = user_metadata["user_id"]
     targets = all_targets.filter(pl.col("user_id") == evaluation_user_id)
     breakout_events = all_breakout_events.filter(
         pl.col("user_id") == evaluation_user_id
     )
+
     first_scoreable_date = targets["scoring_date"].min()
     evaluation_start = dt.date(2022, 1, 1)
     observation_coverage_end = dt.date.fromisoformat(
@@ -84,7 +84,6 @@ def _(
         evaluation_user_id,
         first_scoreable_date,
         last_evaluable_date,
-        metadata,
         observation_coverage_end,
         periods,
         targets,
@@ -94,15 +93,16 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 1. Temporal protocol
+    ## 1. What history can we evaluate?
 
-    The evaluation start is a declared input for the user being evaluated. This modelling cycle starts on 2022-01-01. Six-month calendar folds continue from that date, with partial periods retained when needed.
+    For this user, the current modelling cycle uses 2021 as the learning period and starts historical scoring on **1 January 2022**. Because every score needs 60 future days to know its outcome, evaluation stops 60 days before the end of complete listening coverage.
     """)
     return
 
 
 @app.cell
 def _(
+    dt,
     evaluation_start,
     evaluation_user_id,
     first_scoreable_date,
@@ -112,80 +112,99 @@ def _(
     periods,
     pl,
 ):
-    temporal_boundaries = pl.DataFrame(
+    boundaries = pl.DataFrame(
         [
             {
-                "user_id": evaluation_user_id,
-                "observation_coverage_end": observation_coverage_end,
-                "first_scoreable_date": first_scoreable_date,
-                "evaluation_start": evaluation_start,
-                "last_evaluable_scoring_date": last_evaluable_date,
+                "User": evaluation_user_id,
+                "First scoreable day": first_scoreable_date,
+                "Evaluation starts": evaluation_start,
+                "Listening observed through": observation_coverage_end
+                - dt.timedelta(days=1),
+                "Last evaluable scoring day": last_evaluable_date,
             }
         ]
     )
-    period_table = pl.DataFrame(
+    scoring_periods = pl.DataFrame(
         [
             {
-                "period": period.period,
-                "scoring_start": period.scoring_start,
-                "scoring_end": period.scoring_end,
-                "is_partial": period.is_partial,
+                "Period": period.period,
+                "Scoring starts": period.scoring_start,
+                "Scoring ends": period.scoring_end,
+                "Status": "Partial" if period.is_partial else "Complete",
             }
             for period in periods
         ]
     )
     mo.vstack(
         [
-            mo.md("### Derived boundaries"),
-            mo.ui.table(temporal_boundaries, selection=None),
-            mo.md("### Calendar scoring periods"),
-            mo.ui.table(period_table, selection=None),
+            mo.ui.table(boundaries, selection=None),
+            mo.ui.table(scoring_periods, selection=None),
         ]
     )
-    return period_table, temporal_boundaries
+    return boundaries, scoring_periods
+
+
+@app.cell(hide_code=True)
+def _(last_evaluable_date, mo, periods):
+    _complete_periods = sum(not period.is_partial for period in periods)
+    _last_status = "partial" if periods[-1].is_partial else "complete"
+    mo.md(f"""
+    This gives **{len(periods)} evaluation periods**. **{_complete_periods}** are complete and the last period is **{_last_status}**, ending on **{last_evaluable_date}**.
+
+    The dates line up with the intended 60-day prediction window, so recent days whose outcomes are still unknown are not included in evaluation.
+    """)
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 2. Fold availability
+    ## 2. Does each period train only on outcomes already known?
 
-    `training_cutoff` is the model-fit date. The maximum training horizon must be strictly earlier than that date, including for positive rows whose confirmation was already known.
+    At the start of each six-month period, training may use only rows whose full 60-day outcome window has already finished. The training history then grows as we move forward through time.
     """)
     return
 
 
 @app.cell
-def _(breakout_events, build_walk_forward_folds, periods, pl, targets):
+def _(breakout_events, build_walk_forward_folds, mo, periods, pl, targets):
     folds = build_walk_forward_folds(targets, periods)
-    fold_table = pl.DataFrame(
+    fold_summary = pl.DataFrame(
         [
             {
-                "period": fold.period,
-                "training_cutoff": fold.training_cutoff,
-                "maximum_training_horizon": fold.training[
-                    "horizon_end_date"
-                ].max(),
-                "training_rows": fold.training_rows,
-                "resolved_positive_training_rows": int(
-                    fold.training["target_60d"].sum()
-                ),
-                "scoring_rows": fold.scoring_rows,
-                "scoring_positive_rows": int(
-                    fold.scoring["target_60d"].sum()
-                ),
-                "breakout_confirmations": breakout_events.filter(
+                "Period": fold.period,
+                "Training date": fold.training_cutoff,
+                "Latest outcome date used": fold.training["horizon_end_date"].max(),
+                "Training rows": fold.training_rows,
+                "Scoring rows": fold.scoring_rows,
+                "Breakouts confirmed": breakout_events.filter(
                     pl.col("confirmation_date").is_between(
                         fold.scoring_start, fold.scoring_end
                     )
                 ).height,
-                "is_partial": fold.is_partial,
+                "Status": "Partial" if fold.is_partial else "Complete",
             }
             for fold in folds
         ]
     )
-    fold_table
-    return fold_table, folds
+    mo.ui.table(fold_summary, selection=None)
+    return fold_summary, folds
+
+
+@app.cell(hide_code=True)
+def _(fold_summary, mo, pl):
+    _safe = fold_summary.select(
+        (pl.col("Latest outcome date used") < pl.col("Training date")).all()
+    ).item()
+    _first_training_rows = fold_summary["Training rows"][0]
+    _last_training_rows = fold_summary["Training rows"][-1]
+    mo.md(f"""
+    Every period passes the key check: the latest outcome used for training is **before** that period's training date.
+
+    The available training data grows from **{_first_training_rows:,}** rows in the first period to **{_last_training_rows:,}** in the latest one. This is the expected behaviour for expanding training history.
+    """)
+    assert _safe
+    return
 
 
 @app.cell
@@ -209,88 +228,190 @@ def _(breakout_events, evaluate_scores, evaluation_start, folds, periods, pl):
         oos_start=evaluation_start,
         oos_end=periods[-1].scoring_end,
     )
-    return evaluation, expected_candidates, smoke_scores
+    return evaluation, expected_candidates
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 3. Event opportunity analysis
+    ## 3. How many breakouts can we evaluate fairly?
 
-    Main comparable events require their entire 60-day window inside OOS scoring. Other historical events remain visible, and zero-opportunity events remain unscoreable rather than becoming model misses.
+    For a fair comparison, we only use breakouts where we have the full 60 days of historical rankings before confirmation. We also check whether the artist was actually eligible to be scored, and whether Sonora had a chance to surface them before the breakout started.
     """)
     return
 
 
 @app.cell
 def _(artists, evaluation, mo, pl):
-    event_opportunity_summary = evaluation.opportunity_summary
-    opportunity_distribution = (
-        evaluation.event_results.group_by("valid_opportunities")
-        .len(name="events")
-        .sort("valid_opportunities")
+    _events = evaluation.event_results
+    _comparable = _events.filter(pl.col("is_comparable"))
+    _comparable_scoreable = _comparable.filter(pl.col("is_scoreable"))
+    _comparable_anticipatable = _comparable.filter(pl.col("is_anticipatable"))
+
+    opportunity_summary = pl.DataFrame(
+        [
+            {
+                "Measure": "Historical breakout events",
+                "Events": _events.height,
+            },
+            {
+                "Measure": "Full 60 days available for comparison",
+                "Events": _comparable.height,
+            },
+            {
+                "Measure": "At least one eligible scoring day",
+                "Events": _comparable_scoreable.height,
+            },
+            {
+                "Measure": "Could be scored before breakout started",
+                "Events": _comparable_anticipatable.height,
+            },
+            {
+                "Measure": "No chance to be scored in evaluation",
+                "Events": _events.filter(~pl.col("is_scoreable")).height,
+            },
+        ]
     )
-    event_sample = (
-        evaluation.event_results.join(
+
+    _example_groups = [
+        (
+            "Could score before breakout",
+            _events.filter(pl.col("is_comparable") & pl.col("is_anticipatable")),
+        ),
+        (
+            "Could only score after breakout started",
+            _events.filter(pl.col("is_comparable") & ~pl.col("is_anticipatable")),
+        ),
+        (
+            "No scoring opportunity",
+            _events.filter(~pl.col("is_scoreable")),
+        ),
+    ]
+    _examples = []
+    for _case, _group in _example_groups:
+        if _group.height:
+            _examples.append(
+                _group.sort("confirmation_date")
+                .head(1)
+                .with_columns(pl.lit(_case).alias("Case"))
+            )
+    event_examples = (
+        pl.concat(_examples)
+        .join(
             artists.select("artist_id", "canonical_name"),
             on="artist_id",
             how="left",
             validate="m:1",
         )
         .select(
-            "user_id",
-            "canonical_name",
-            "confirmation_date",
-            "valid_opportunities",
-            "pre_start_opportunities",
-            "is_comparable",
-            "timing_stage",
+            "Case",
+            pl.col("canonical_name").alias("Artist"),
+            pl.col("breakout_period_start").alias("Breakout starts"),
+            pl.col("confirmation_date").alias("Confirmed"),
+            pl.col("valid_opportunities").alias("Eligible scoring days"),
+            pl.col("pre_start_opportunities").alias("Before-start scoring days"),
         )
-        .head(12)
     )
+
     mo.vstack(
         [
-            mo.ui.table(event_opportunity_summary, selection=None),
-            mo.md("### Valid opportunities per event"),
-            mo.ui.table(opportunity_distribution, selection=None),
-            mo.md("### Event sample"),
-            mo.ui.table(event_sample, selection=None),
+            mo.ui.table(opportunity_summary, selection=None),
+            mo.md("### Examples"),
+            mo.ui.table(event_examples, selection=None),
         ]
     )
-    return event_opportunity_summary, event_sample, opportunity_distribution
+    return event_examples, opportunity_summary
+
+
+@app.cell(hide_code=True)
+def _(evaluation, mo, pl):
+    _events = evaluation.event_results
+    _comparable = _events.filter(pl.col("is_comparable"))
+    _scoreable = _comparable.filter(pl.col("is_scoreable")).height
+    _anticipatable = _comparable.filter(pl.col("is_anticipatable")).height
+    _unscoreable = _events.filter(~pl.col("is_scoreable")).height
+    mo.md(f"""
+    **{_comparable.height} breakout events** have the full 60 days needed for a fair comparison, and **{_scoreable}** of them have at least one day where Sonora could score the artist.
+
+    **{_anticipatable}** could be scored before the breakout started. The **{_unscoreable}** historical events where Sonora had no chance to score the artist stay visible, but they are not counted as misses.
+    """)
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 4. Evaluator smoke test
+    ## 4. Does the evaluator run end to end?
 
-    These results validate plumbing only. The synthetic score is not a behavioural baseline and must not be interpreted as model performance.
+    We use an artificial daily ordering only to make sure the evaluator works from start to finish. It is not a baseline, so its performance numbers are deliberately not shown.
     """)
     return
 
 
 @app.cell
-def _(evaluation, mo):
-    mo.vstack(
+def _(evaluation, evaluation_start, expected_candidates, mo, periods, pl):
+    _expected_days = expected_candidates.select("user_id", "scoring_date").n_unique()
+    _unscoreable_are_separate = evaluation.event_results.filter(
+        ~pl.col("is_scoreable") & (pl.col("timing_stage") != "Unscoreable")
+    ).is_empty()
+    checks = pl.DataFrame(
         [
-            mo.md("### Event-level result sample"),
-            mo.ui.table(evaluation.event_results.head(12), selection=None),
-            mo.md("### Timing stages"),
-            mo.ui.table(
-                evaluation.event_results.group_by("timing_stage")
-                .len()
-                .sort("timing_stage"),
-                selection=None,
-            ),
-            mo.md("### Pooled event summary"),
-            mo.ui.table(evaluation.event_summary, selection=None),
-            mo.md("### Confirmation-period summaries"),
-            mo.ui.table(evaluation.period_summary, selection=None),
-            mo.md("### Daily ranking summary"),
-            mo.ui.table(evaluation.daily_summary, selection=None),
+            {
+                "Check": "Every scoring candidate received one rank",
+                "Result": "Passed"
+                if evaluation.rankings.height == expected_candidates.height
+                else "Failed",
+            },
+            {
+                "Check": "Rankings stay inside the evaluation dates",
+                "Result": "Passed"
+                if evaluation.rankings["scoring_date"].min() >= evaluation_start
+                and evaluation.rankings["scoring_date"].max()
+                <= periods[-1].scoring_end
+                else "Failed",
+            },
+            {
+                "Check": "Daily metrics cover every scoring day",
+                "Result": "Passed"
+                if evaluation.daily_metrics.height == _expected_days
+                else "Failed",
+            },
+            {
+                "Check": "Events with no scoring opportunity stay separate",
+                "Result": "Passed" if _unscoreable_are_separate else "Failed",
+            },
         ]
     )
+    mo.ui.table(checks, selection=None)
+    return checks
+
+
+@app.cell(hide_code=True)
+def _(checks, mo, pl):
+    _all_passed = checks.filter(pl.col("Result") != "Passed").is_empty()
+    mo.md(
+        "All checks pass. The evaluation framework can take a complete daily score stream, "
+        "rank every eligible artist, and handle breakout opportunities as intended."
+        if _all_passed
+        else "At least one validation check failed and should be reviewed before using the evaluator."
+    )
+    assert _all_passed
+    return
+
+
+@app.cell(hide_code=True)
+def _(evaluation, last_evaluable_date, mo, periods, pl):
+    _comparable = evaluation.event_results.filter(pl.col("is_comparable"))
+    _anticipatable = _comparable.filter(pl.col("is_anticipatable")).height
+    mo.md(f"""
+    ## 5. Conclusion
+
+    The framework produces **{len(periods)} historical scoring periods** through **{last_evaluable_date}** without using future outcomes too early.
+
+    The main comparison set contains **{_comparable.height} breakout events**. Of those, **{_anticipatable}** give Sonora at least one chance to surface the artist before breakout behaviour begins.
+
+    The evaluation framework is ready to use for behavioural baselines. The ranking metrics will become meaningful once Phase 2 provides real baseline scores.
+    """)
     return
 
 
