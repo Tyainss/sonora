@@ -1,13 +1,13 @@
 import datetime as dt
 
 import polars as pl
+import pytest
 
 from sonora.breakout import (
     score_listening_share_momentum,
     score_recent_active_days,
     score_recent_listening_share,
 )
-
 
 BASE = dt.date(2024, 1, 10)
 
@@ -135,7 +135,10 @@ def test_momentum_prefers_rising_share_over_higher_current_share():
             *[("u", "a", listened(day, 9)) for day in [-7, -6, -5]],
             *[("u", "b", listened(day, 10)) for day in [-14, -13, -12, -11]],
             *[("u", "b", listened(day, 11)) for day in [-7, -6, -5, -4, -3]],
-            *[("u", "filler", listened(day, 12)) for day in [-14, -13, -12, -11, -10, -9]],
+            *[
+                ("u", "filler", listened(day, 12))
+                for day in [-14, -13, -12, -11, -10, -9]
+            ],
             *[("u", "filler", listened(day, 13)) for day in [-7, -6]],
         ]
     )
@@ -153,8 +156,8 @@ def test_momentum_prefers_rising_share_over_higher_current_share():
             "listening_share_momentum",
         ).iter_rows()
     }
-    assert values["a"] == (3 / 10, 0.0, 3 / 10)
-    assert values["b"] == (5 / 10, 4 / 10, 1 / 10)
+    assert values["a"] == pytest.approx((3 / 10, 0.0, 3 / 10))
+    assert values["b"] == pytest.approx((5 / 10, 4 / 10, 1 / 10))
 
 
 def test_equal_momentum_uses_current_share_as_first_tie_break():
@@ -175,9 +178,7 @@ def test_equal_momentum_uses_current_share_as_first_tie_break():
     result = score_listening_share_momentum(history, scoring)
 
     assert result["artist_id"].to_list() == ["a", "b"]
-    momentum = dict(
-        result.select("artist_id", "listening_share_momentum").iter_rows()
-    )
+    momentum = dict(result.select("artist_id", "listening_share_momentum").iter_rows())
     assert momentum["a"] == momentum["b"]
 
 
