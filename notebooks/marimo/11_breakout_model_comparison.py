@@ -14,6 +14,7 @@ def _():
     import polars as pl
 
     from sonora.breakout import build_modeling_data, score_recent_listening_share
+    from sonora.breakout.diagnostics import diagnose_lost_detections
     from sonora.breakout.evaluation import (
         EvaluationPeriod,
         build_evaluation_periods,
@@ -37,6 +38,7 @@ def _():
         capture_comparison_context,
         combine_score_streams,
         compare_event_detections,
+        diagnose_lost_detections,
         dt,
         evaluate_scores,
         json,
@@ -286,6 +288,98 @@ def _(artist_names, mo, paired_events, pl):
         pl.col("days_earlier").alias("Days earlier"),
     )
     mo.accordion({"New/lost detections and the five largest changes in each direction": mo.ui.table(_details, selection=None)})
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Why did the model miss breakouts the baseline caught?
+
+    Each event needs enough eligible Top-3 days before confirmation. The summary counts the full evaluation window; the details show days when either approach ranked the artist in its Top 3.
+    """)
+    return
+
+
+@app.cell
+def _(baseline_evaluation, diagnose_lost_detections, fold_results, model_evaluation):
+    lost_diagnostics = diagnose_lost_detections(baseline_evaluation, model_evaluation, fold_results)
+    return (lost_diagnostics,)
+
+
+@app.cell
+def _(artist_names, lost_diagnostics, mo, pl):
+    _summary = lost_diagnostics.summary.join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("reference_detection_date").alias("Baseline detection"),
+        pl.col("valid_opportunities").alias("Eligible days"),
+        pl.col("required_top3_appearances").alias("Required Top-3 days"),
+        pl.col("baseline_top3_days").alias("Baseline Top-3 days"),
+        pl.col("model_top3_days").alias("Model Top-3 days"),
+        pl.col("best_model_rank").alias("Best model rank"),
+    )
+    mo.ui.table(_summary, selection=None) if not _summary.is_empty() else mo.md("The model lost no detections in this comparison.")
+    return
+
+
+@app.cell
+def _(artist_names, lost_diagnostics, mo, pl):
+    mo.stop(lost_diagnostics.summary.is_empty())
+    _cases = {}
+    for _event in lost_diagnostics.summary.join(artist_names, on="artist_id", how="left", validate="m:1").to_dicts():
+        _artist = _event["artist_id"]
+        _user = _event["user_id"]
+        _name = _event["canonical_name"] or _artist
+        _days = lost_diagnostics.daily_ranks.filter(
+            (pl.col("user_id") == _user) & (pl.col("artist_id") == _artist)
+            & ((pl.col("baseline_rank") <= 3) | (pl.col("model_rank") <= 3))
+        ).select(
+            pl.col("scoring_date").alias("Date"),
+            pl.col("baseline_rank").alias("Baseline rank"),
+            pl.col("model_rank").alias("Model rank"),
+            (100 * pl.col("listening_share_7d")).round(2).alias("Recent share (%)"),
+            pl.col("previous_listening_count").cast(pl.Int64).alias("Earlier listens"),
+        )
+        _promotions = lost_diagnostics.displacements.filter(
+            (pl.col("user_id") == _user) & (pl.col("artist_id") == _artist)
+        ).join(
+            artist_names.rename({"artist_id": "promoted_artist_id"}),
+            on="promoted_artist_id", how="left", validate="m:1",
+        ).select(
+            pl.col("scoring_date").alias("Date"),
+            pl.col("canonical_name").fill_null(pl.col("promoted_artist_id")).alias("Promoted artist"),
+            pl.col("promoted_baseline_rank").alias("Baseline rank"),
+            pl.col("promoted_model_rank").alias("Model rank"),
+            (100 * pl.col("promoted_listening_share_7d")).round(2).alias("Recent share (%)"),
+            pl.col("promoted_previous_listening_count").cast(pl.Int64).alias("Earlier listens"),
+            pl.col("share_advantage").round(3).alias("Recent-share advantage"),
+            pl.col("previous_count_advantage").round(3).alias("Earlier-listening advantage"),
+            pl.col("model_advantage").round(3).alias("Model score lead"),
+        )
+        _cases[_name] = mo.vstack([
+            mo.md("**Days in either Top 3**"),
+            mo.ui.table(_days, selection=None, page_size=max(1, _days.height)),
+            mo.md("**Artists promoted from outside the baseline Top 3**"),
+            mo.ui.table(_promotions, selection=None, page_size=max(1, _promotions.height)),
+        ])
+    mo.accordion(_cases)
+    return
+
+
+@app.cell(hide_code=True)
+def _(lost_diagnostics, mo, pl):
+    mo.stop(lost_diagnostics.summary.is_empty())
+    _promotions = lost_diagnostics.displacements
+    _overturns = _promotions.filter(
+        (pl.col("share_advantage") < 0)
+        & (pl.col("previous_count_advantage") > 0)
+        & (pl.col("model_advantage") > 0)
+    ).height
+    mo.md(f"""
+    In **{_overturns} of {_promotions.height}** listed promotions, an earlier-listening advantage outweighed a recent-share disadvantage.
+
+    The two feature advantages add up to the promoted artist's model score lead, using the fitted model for that day. These are decision-score differences, not probabilities. Several artists can enter or leave the Top 3 on the same day.
+    """)
     return
 
 
