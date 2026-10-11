@@ -16,6 +16,7 @@ from mlflow import MlflowClient
 from mlflow.environment_variables import MLFLOW_DISABLE_TELEMETRY
 from mlflow.models import infer_signature
 
+from sonora.breakout.diagnostics import diagnose_lost_detections
 from sonora.breakout.evaluation.comparison import compare_event_detections
 from sonora.breakout.evaluation.evaluate import EvaluationResult
 from sonora.breakout.evaluation.events import TOP_K
@@ -229,6 +230,13 @@ def record_comparison(
                         if isinstance(value, (int, float)) and math.isfinite(value):
                             client.log_metric(run_id, f"{name}.{key}", float(value))
             paired.write_parquet(destination / "paired_events.parquet")
+            diagnostics = diagnose_lost_detections(baseline, model, fold_results)
+            directory = destination / "diagnostics/lost_detections"
+            directory.mkdir(parents=True)
+            for table in ["summary", "daily_ranks", "displacements"]:
+                getattr(diagnostics, table).write_parquet(
+                    directory / f"{table}.parquet"
+                )
             changes = dict(paired.group_by("change").len().iter_rows())
             for change in [
                 "Earlier",
