@@ -24,6 +24,7 @@ def _():
     from sonora.breakout.evaluation.comparison import compare_event_detections
     from sonora.breakout.evaluation.holdout import load_or_create_holdout
     from sonora.breakout.modeling import run_logistic_walk_forward
+    from sonora.breakout.tracking import capture_comparison_context, record_comparison
     from sonora.data.paths import DEFAULT_DATA_PATHS
 
     paths = DEFAULT_DATA_PATHS
@@ -33,6 +34,7 @@ def _():
         build_evaluation_periods,
         build_modeling_data,
         build_walk_forward_folds,
+        capture_comparison_context,
         combine_score_streams,
         compare_event_detections,
         dt,
@@ -42,6 +44,7 @@ def _():
         mo,
         paths,
         pl,
+        record_comparison,
         run_logistic_walk_forward,
         score_recent_listening_share,
     )
@@ -64,6 +67,7 @@ def _(
     EvaluationPeriod,
     Path,
     build_evaluation_periods,
+    capture_comparison_context,
     dt,
     json,
     load_or_create_holdout,
@@ -82,6 +86,12 @@ def _(
         user_id=_user_id,
         generation="first_ml",
         observation_coverage_end=_coverage_end,
+    )
+    comparison_context = capture_comparison_context(
+        project_root=Path("."),
+        paths=paths,
+        build_metadata=_metadata,
+        holdout_path=Path("artifacts/breakout/first_ml_holdout.json"),
     )
     evaluation_start = dt.date(dt.date.fromisoformat(_user["score_start"]).year + 1, 1, 1)
     periods = [
@@ -120,6 +130,7 @@ def _(
     artist_names = pl.read_parquet(paths.curated_artists).select("artist_id", "canonical_name")
     return (
         artist_names,
+        comparison_context,
         development_events,
         development_targets,
         evaluation_start,
@@ -373,6 +384,36 @@ def _(baseline_evaluation, mo, model_evaluation, paired_events):
 
     More anticipatory detections are useful only when considered alongside coverage losses and delays elsewhere. The period comparison shows whether the changes are spread through the history.
     """)
+    return
+
+
+@app.cell
+def _(mo):
+    record_button = mo.ui.run_button(label="Record comparison in MLflow")
+    record_button
+    return (record_button,)
+
+
+@app.cell
+def _(
+    Path,
+    baseline_evaluation,
+    comparison_context,
+    fold_results,
+    mo,
+    model_evaluation,
+    record_button,
+    record_comparison,
+):
+    mo.stop(not record_button.value)
+    _run_id = record_comparison(
+        baseline=baseline_evaluation,
+        model=model_evaluation,
+        fold_results=fold_results,
+        context=comparison_context,
+        project_root=Path("."),
+    )
+    mo.md(f"Recorded comparison: `{_run_id}`.")
     return
 
 
