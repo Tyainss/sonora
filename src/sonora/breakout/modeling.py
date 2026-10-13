@@ -9,7 +9,11 @@ from sklearn.compose import ColumnTransformer
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
+from sklearn.preprocessing import (
+    FunctionTransformer,
+    PolynomialFeatures,
+    StandardScaler,
+)
 
 from sonora.breakout.evaluation.periods import EvaluationPeriod
 from sonora.breakout.evaluation.rankings import rank_scores
@@ -28,8 +32,10 @@ class LogisticFoldResult:
     scores: pl.DataFrame
 
 
-def fit_logistic_regression(training: pl.DataFrame) -> Pipeline:
-    """Fit the two-feature L2 model on resolved rows selected by a temporal split."""
+def fit_logistic_regression(
+    training: pl.DataFrame, *, interaction: bool = False
+) -> Pipeline:
+    """Fit L2 regression, optionally adding share × log-count before scaling."""
     inputs = _model_inputs(training)
     required = {"target_60d", "has_full_horizon"}
     if required - set(training.columns):
@@ -71,6 +77,14 @@ def fit_logistic_regression(training: pl.DataFrame) -> Pipeline:
             ),
         ]
     )
+    if interaction:
+        model.steps.insert(
+            1,
+            (
+                "interaction",
+                PolynomialFeatures(degree=2, interaction_only=True, include_bias=False),
+            ),
+        )
     with warnings.catch_warnings():
         warnings.simplefilter("error", ConvergenceWarning)
         model.fit(inputs, training["target_60d"].to_numpy())
@@ -124,6 +138,8 @@ def run_logistic_walk_forward(
     data: pl.DataFrame,
     periods: list[EvaluationPeriod],
     baseline_scores: pl.DataFrame,
+    *,
+    interaction: bool = False,
 ) -> list[LogisticFoldResult]:
     """Fit a fresh pipeline for each non-empty scoring fold using existing splits.
 
@@ -139,7 +155,7 @@ def run_logistic_walk_forward(
     rank_scores(baseline_scores, expected)
     results = []
     for fold in folds:
-        model = fit_logistic_regression(fold.training)
+        model = fit_logistic_regression(fold.training, interaction=interaction)
         baseline = baseline_scores.join(
             fold.scoring.select(CANDIDATE_KEYS), on=CANDIDATE_KEYS, how="semi"
         )

@@ -6,9 +6,17 @@ import polars as pl
 import pytest
 from sklearn.pipeline import Pipeline
 
-from sonora.breakout.diagnostics import diagnose_lost_detections
+from sonora.breakout.diagnostics import (
+    diagnose_lost_detections,
+    review_detection_changes,
+)
 from sonora.breakout.evaluation import EvaluationPeriod, evaluate_scores
-from sonora.breakout.modeling import MODEL_FEATURES, run_logistic_walk_forward
+from sonora.breakout.modeling import (
+    MODEL_FEATURES,
+    fit_logistic_regression,
+    run_logistic_walk_forward,
+    score_logistic_regression,
+)
 
 KEYS = ["user_id", "artist_id", "scoring_date"]
 
@@ -172,3 +180,55 @@ def test_mismatched_daily_candidates_are_rejected(comparison):
     model = replace(model, rankings=model.rankings.slice(1))
     with pytest.raises(ValueError, match="same candidates"):
         diagnose_lost_detections(baseline, model, folds)
+
+
+@pytest.mark.parametrize("same_day", [False, True])
+def test_event_review_keeps_both_losses_and_unchanged_events_with_null_miss_context(
+    comparison, same_day
+):
+    baseline, model, folds = comparison
+    reviewed = review_detection_changes(
+        baseline, baseline if same_day else model, folds
+    )
+    assert reviewed.height == 1
+    row = reviewed.row(0, named=True)
+    assert row["change"] == ("Same day" if same_day else "Lost detection")
+    assert row["first_eligible_date"] == dt.date(2022, 6, 30)
+    assert row["history_at_entry"] == "No earlier listens"
+    assert row["entry_previous_count"] == 0
+    assert row["baseline_detection_previous_count"] == 0
+    assert row["model_detection_previous_count"] == (0 if same_day else None)
+
+
+def test_interaction_contributions_reconstruct_original_fold_scores(comparison):
+    baseline, _, folds = comparison
+    results = []
+    for original in folds:
+        model = fit_logistic_regression(original.fold.training, interaction=True)
+        scores = score_logistic_regression(
+            model,
+            original.fold.scoring,
+            baseline.rankings.select(*KEYS, "score").join(
+                original.fold.scoring.select(KEYS), on=KEYS, how="semi"
+            ),
+        )
+        results.append(replace(original, model=model, scores=scores))
+    model = evaluate_scores(
+        pl.concat([r.scores for r in results]),
+        pl.concat([r.fold.scoring for r in results]),
+        baseline.event_results,
+        oos_start=folds[0].fold.scoring_start,
+        oos_end=folds[-1].fold.scoring_end,
+    )
+    reviewed = review_detection_changes(baseline, model, results)
+    assert reviewed.height == 1
+    diagnostic = diagnose_lost_detections(baseline, model, results)
+    assert diagnostic.daily_ranks.height > 0
+    values = diagnostic.daily_ranks
+    np.testing.assert_allclose(
+        values["share_contribution"]
+        + values["previous_count_contribution"]
+        + values["interaction_contribution"]
+        + values["intercept"],
+        values["model_score"],
+    )

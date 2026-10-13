@@ -75,8 +75,9 @@ def test_preprocessing_logs_only_previous_count_and_fits_all_training_rows():
     assert model.named_steps["scale"].n_samples_seen_ == rows.height
 
 
-def test_scoring_keeps_fitted_preprocessing_and_ignores_target_metadata():
-    model = fit_logistic_regression(training())
+@pytest.mark.parametrize("interaction", [False, True])
+def test_scoring_keeps_fitted_preprocessing_and_ignores_target_metadata(interaction):
+    model = fit_logistic_regression(training(), interaction=interaction)
     means = model.named_steps["scale"].mean_.copy()
     scales = model.named_steps["scale"].scale_.copy()
     rows = scoring().with_columns(pl.lit(1_000_000).alias("previous_listening_count"))
@@ -88,6 +89,23 @@ def test_scoring_keeps_fitted_preprocessing_and_ignores_target_metadata():
     assert_allclose(model.named_steps["scale"].mean_, means)
     assert_allclose(model.named_steps["scale"].scale_, scales)
     assert_allclose(result["model_score"].to_numpy(), other["model_score"].to_numpy())
+
+
+def test_interaction_uses_share_times_logged_count_before_training_only_scaling():
+    rows = training()
+    model = fit_logistic_regression(rows, interaction=True)
+    share = rows["listening_share_7d"].to_numpy()
+    logged = np.log1p(rows["previous_listening_count"].to_numpy())
+    terms = np.column_stack([share, logged, share * logged])
+    assert_allclose(model[:2].transform(rows.select(MODEL_FEATURES).to_numpy()), terms)
+    assert_allclose(model.named_steps["scale"].mean_, terms.mean(axis=0))
+    assert model.named_steps["scale"].n_samples_seen_ == rows.height
+    additive = fit_logistic_regression(rows)
+    assert (
+        model.named_steps["classifier"].get_params()
+        == additive.named_steps["classifier"].get_params()
+    )
+    assert model.named_steps["classifier"].n_features_in_ == 3
 
 
 def test_exact_ties_follow_baseline_but_even_small_model_differences_take_priority():

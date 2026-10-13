@@ -21,6 +21,63 @@ class LostDetectionDiagnostics:
     displacements: pl.DataFrame
 
 
+def review_detection_changes(
+    baseline: EvaluationResult,
+    model: EvaluationResult,
+    fold_results: list[LogisticFoldResult],
+) -> pl.DataFrame:
+    """Review every comparable event with history at entry and both detection dates.
+
+    Entry is the first eligible scoring day in the event's evaluation window.
+    The history group describes listens before that day's recent seven-day window.
+    It is a point-in-time description, not an artist age or discovery label.
+    """
+    paired = compare_event_detections(baseline.event_results, model.event_results)
+    days = (
+        paired.select(EVENT_KEYS)
+        .join(
+            model.event_results.select(
+                *EVENT_KEYS, "evaluation_window_start", "evaluation_window_end"
+            ),
+            on=EVENT_KEYS,
+            validate="1:1",
+        )
+        .join(model.rankings.select(CANDIDATE_KEYS), on=EVENT_KEYS, validate="1:m")
+        .filter(
+            pl.col("scoring_date").is_between(
+                pl.col("evaluation_window_start"), pl.col("evaluation_window_end")
+            )
+        )
+    )
+    reviewed = paired.join(
+        days.group_by(EVENT_KEYS).agg(
+            pl.col("scoring_date").min().alias("first_eligible_date")
+        ),
+        on=EVENT_KEYS,
+        validate="1:1",
+    )
+    for checkpoint, date_column in [
+        ("entry", "first_eligible_date"),
+        ("baseline_detection", "reference_detection_date"),
+        ("model_detection", "model_detection_date"),
+    ]:
+        keys = reviewed.filter(pl.col(date_column).is_not_null()).select(
+            *EVENT_KEYS, pl.col(date_column).alias("scoring_date")
+        )
+        features = _explain_scores(fold_results, keys).select(
+            *EVENT_KEYS,
+            pl.col("listening_share_7d").alias(f"{checkpoint}_share"),
+            pl.col("previous_listening_count").alias(f"{checkpoint}_previous_count"),
+        )
+        reviewed = reviewed.join(features, on=EVENT_KEYS, how="left", validate="1:1")
+    return reviewed.with_columns(
+        pl.when(pl.col("entry_previous_count") == 0)
+        .then(pl.lit("No earlier listens"))
+        .otherwise(pl.lit("Earlier listens"))
+        .alias("history_at_entry")
+    ).sort("confirmation_date", *EVENT_KEYS)
+
+
 def diagnose_lost_detections(
     baseline: EvaluationResult,
     model: EvaluationResult,
@@ -118,6 +175,10 @@ def diagnose_lost_detections(
                 pl.col("promoted_previous_count_contribution")
                 - pl.col("previous_count_contribution")
             ).alias("previous_count_advantage"),
+            (
+                pl.col("promoted_interaction_contribution")
+                - pl.col("interaction_contribution")
+            ).alias("interaction_advantage"),
         )
     )
     summary = (
@@ -158,6 +219,7 @@ def _explain_scores(
         "period": pl.String,
         "share_contribution": pl.Float64,
         "previous_count_contribution": pl.Float64,
+        "interaction_contribution": pl.Float64,
         "intercept": pl.Float64,
         "model_score": pl.Float64,
     }
@@ -174,6 +236,12 @@ def _explain_scores(
             pl.lit(result.fold.period).alias("period"),
             pl.Series("share_contribution", contributions[:, 0]),
             pl.Series("previous_count_contribution", contributions[:, 1]),
+            pl.Series(
+                "interaction_contribution",
+                contributions[:, 2]
+                if "interaction" in result.model.named_steps
+                else np.zeros(rows.height),
+            ),
             pl.lit(float(classifier.intercept_[0])).alias("intercept"),
         ).join(
             result.scores.select(*CANDIDATE_KEYS, "model_score"),
@@ -185,6 +253,7 @@ def _explain_scores(
             explained.select(
                 pl.col("share_contribution")
                 + pl.col("previous_count_contribution")
+                + pl.col("interaction_contribution")
                 + pl.col("intercept")
             )
             .to_series()
