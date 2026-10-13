@@ -27,7 +27,10 @@ def _():
     )
     from sonora.breakout.evaluation.comparison import compare_event_detections
     from sonora.breakout.evaluation.holdout import load_or_create_holdout
-    from sonora.breakout.modeling import run_logistic_walk_forward
+    from sonora.breakout.modeling import (
+        run_boosted_tree_walk_forward,
+        run_logistic_walk_forward,
+    )
     from sonora.breakout.timing import audit_detection_timing
     from sonora.breakout.tracking import capture_comparison_context, record_comparison
     from sonora.data.paths import DEFAULT_DATA_PATHS
@@ -53,6 +56,7 @@ def _():
         pl,
         record_comparison,
         review_detection_changes,
+        run_boosted_tree_walk_forward,
         run_logistic_walk_forward,
         score_recent_listening_share,
     )
@@ -63,9 +67,10 @@ def _(mo):
     mo.md(r"""
     # Can listening history help detect breakouts earlier?
 
-    I compare **7-day listening share** with **additive**, **interaction**, and **recency Logistic Regression**. All models use recent share and log-transformed earlier listens, which exclude the most recent seven days. The interaction adds their product. The recency model adds days since the latest listen strictly before the recent week, plus a flag for artists with no earlier history.
+    I compare **7-day listening share**, three **Logistic Regression** variants, and **gradient-boosted trees**. The logistic models use recent share and log-transformed earlier listens. The interaction adds their product; recency adds the prior-listening gap and a missing-history flag. Earlier history excludes the most recent seven days.
 
-    All approaches rank the same artists on the same dates. Detection requires two Top-3 appearances within the 60 days before confirmation, reduced to one when only one eligible day exists. Missing gaps use the training fold's median; scaling is also fitted on that fold.
+    All approaches rank the same artists on the same dates. Detection requires two Top-3 appearances within the 60 days before confirmation, reduced to one when only one eligible day exists. Recency LR fills missing gaps with its training fold's median; logistic scaling is also fitted on the training fold.
+    Trees use the same three raw inputs as recency LR, with native missing-value handling. Their configuration is fixed across folds: 100 rounds, learning rate 0.05, depth at most 3, at most 7 leaves, at least 100 rows per leaf, and L2 regularization 1. Automatic early stopping is disabled.
     """)
     return
 
@@ -171,6 +176,7 @@ def _(
     periods,
     pl,
     run_logistic_walk_forward,
+    run_boosted_tree_walk_forward,
     review_detection_changes,
     score_recent_listening_share,
     user_listening,
@@ -182,6 +188,7 @@ def _(
     fold_results = run_logistic_walk_forward(_data, periods, baseline_scores)
     interaction_fold_results = run_logistic_walk_forward(_data, periods, baseline_scores, interaction=True)
     recency_fold_results = run_logistic_walk_forward(_data, periods, baseline_scores, recency=True)
+    tree_fold_results = run_boosted_tree_walk_forward(_data, periods, baseline_scores)
     _model_scores = combine_score_streams([result.scores for result in fold_results])
     baseline_evaluation = evaluate_scores(
         baseline_scores,
@@ -216,7 +223,16 @@ def _(
     recency_vs_baseline = compare_event_detections(baseline_evaluation.event_results, recency_evaluation.event_results)
     recency_vs_model = compare_event_detections(model_evaluation.event_results, recency_evaluation.event_results)
     recency_event_review = review_detection_changes(baseline_evaluation, recency_evaluation, recency_fold_results)
-    return baseline_evaluation, event_review, fold_results, interaction_evaluation, interaction_fold_results, interaction_vs_baseline, interaction_vs_model, model_evaluation, paired_events, recency_evaluation, recency_fold_results, recency_vs_baseline, recency_vs_model, recency_event_review
+    tree_evaluation = evaluate_scores(
+        combine_score_streams([result.scores for result in tree_fold_results]),
+        expected_candidates, development_events,
+        oos_start=evaluation_start, oos_end=periods[-1].scoring_end,
+    )
+    tree_vs_baseline = compare_event_detections(baseline_evaluation.event_results, tree_evaluation.event_results)
+    tree_vs_model = compare_event_detections(model_evaluation.event_results, tree_evaluation.event_results)
+    tree_vs_recency = compare_event_detections(recency_evaluation.event_results, tree_evaluation.event_results)
+    tree_event_review = review_detection_changes(baseline_evaluation, tree_evaluation, tree_fold_results)
+    return baseline_evaluation, event_review, fold_results, interaction_evaluation, interaction_fold_results, interaction_vs_baseline, interaction_vs_model, model_evaluation, paired_events, recency_evaluation, recency_fold_results, recency_vs_baseline, recency_vs_model, recency_event_review, tree_evaluation, tree_fold_results, tree_vs_baseline, tree_vs_model, tree_vs_recency, tree_event_review
 
 
 @app.cell(hide_code=True)
@@ -230,7 +246,7 @@ def _(mo):
 
 
 @app.cell
-def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl, recency_evaluation):
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl, recency_evaluation, tree_evaluation):
     def _row(name, evaluation):
         _summary = evaluation.event_summary.row(0, named=True)
         _events = evaluation.event_results.filter(pl.col("is_comparable") & pl.col("is_scoreable"))
@@ -245,7 +261,7 @@ def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl, rec
             "Median days before start": _summary["days_to_breakout_start_median"],
         }
     mo.ui.table(
-        pl.DataFrame([_row("7-day listening share", baseline_evaluation), _row("Additive LR", model_evaluation), _row("Interaction LR", interaction_evaluation), _row("Recency LR", recency_evaluation)]),
+        pl.DataFrame([_row("7-day listening share", baseline_evaluation), _row("Additive LR", model_evaluation), _row("Interaction LR", interaction_evaluation), _row("Recency LR", recency_evaluation), _row("Boosted trees", tree_evaluation)]),
         selection=None,
     )
     return
@@ -256,7 +272,7 @@ def _(baseline_evaluation, mo, model_evaluation):
     _baseline = baseline_evaluation.event_summary.row(0, named=True)
     _model = model_evaluation.event_summary.row(0, named=True)
     mo.md(f"""
-    All four approaches evaluate the same **{_baseline['scoreable_events']}** scoreable events. **{_baseline['anticipatable_events']}** had an eligible day before breakout listening started.
+    All five approaches evaluate the same **{_baseline['scoreable_events']}** scoreable events. **{_baseline['anticipatable_events']}** had an eligible day before breakout listening started.
 
     The median timing uses detected events only. Positive days mean detection before breakout starts; negative days mean detection after it starts. The paired comparison below shows timing changes for the same events.
     """)
@@ -276,9 +292,9 @@ def _(mo):
 
 
 @app.cell
-def _(audit_detection_timing, baseline_evaluation, development_events, fold_results, interaction_evaluation, model_evaluation, recency_evaluation):
+def _(audit_detection_timing, baseline_evaluation, development_events, fold_results, interaction_evaluation, model_evaluation, recency_evaluation, tree_evaluation):
     timing_audit = audit_detection_timing(
-        {"baseline": baseline_evaluation, "additive": model_evaluation, "interaction": interaction_evaluation, "recency": recency_evaluation},
+        {"baseline": baseline_evaluation, "additive": model_evaluation, "interaction": interaction_evaluation, "recency": recency_evaluation, "tree": tree_evaluation},
         fold_results,
         development_events,
     )
@@ -368,9 +384,9 @@ def _(mo):
 
 
 @app.cell
-def _(interaction_vs_baseline, interaction_vs_model, mo, paired_events, pl, recency_vs_baseline, recency_vs_model):
+def _(interaction_vs_baseline, interaction_vs_model, mo, paired_events, pl, recency_vs_baseline, recency_vs_model, tree_vs_baseline, tree_vs_model, tree_vs_recency):
     _rows = []
-    for _name, _paired in [("Additive vs baseline", paired_events), ("Interaction vs baseline", interaction_vs_baseline), ("Interaction vs additive", interaction_vs_model), ("Recency vs baseline", recency_vs_baseline), ("Recency vs additive", recency_vs_model)]:
+    for _name, _paired in [("Additive vs baseline", paired_events), ("Interaction vs baseline", interaction_vs_baseline), ("Interaction vs additive", interaction_vs_model), ("Recency vs baseline", recency_vs_baseline), ("Recency vs additive", recency_vs_model), ("Trees vs baseline", tree_vs_baseline), ("Trees vs additive", tree_vs_model), ("Trees vs recency", tree_vs_recency)]:
         _counts = dict(_paired.group_by("change").len().iter_rows())
         _rows.append({"Comparison": _name, **{change: _counts.get(change, 0) for change in ["Earlier", "Later", "Same day", "Newly detected", "Lost detection", "Missed by both"]}, "Median days earlier (both detected)": _paired["days_earlier"].median()})
     mo.ui.table(
@@ -421,9 +437,9 @@ def _(mo):
 
 
 @app.cell
-def _(event_review, mo, pl, recency_event_review):
+def _(event_review, mo, pl, recency_event_review, tree_event_review):
     _rows = []
-    for _name, _review in [("Additive LR", event_review), ("Recency LR", recency_event_review)]:
+    for _name, _review in [("Additive LR", event_review), ("Recency LR", recency_event_review), ("Boosted trees", tree_event_review)]:
         for _group in ["No earlier listens", "Earlier listens"]:
             _events = _review.filter(pl.col("history_at_entry") == _group)
             _counts = dict(_events.group_by("change").len().iter_rows())
@@ -615,6 +631,47 @@ def _(artist_names, mo, pl, recency_lost_diagnostics):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ## Which breakouts do trees recover or lose?
+
+    These comparisons use the same eligible scoring days. Tree scores combine conditional rules; the details report raw inputs and ranks without assigning linear feature contributions.
+    """)
+    return
+
+
+@app.cell
+def _(artist_names, baseline_evaluation, diagnose_lost_detections, mo, pl, tree_evaluation, tree_fold_results, tree_vs_model, tree_vs_recency):
+    _changes = []
+    for _name, _paired in [("Trees vs additive", tree_vs_model), ("Trees vs recency", tree_vs_recency)]:
+        _changes.append(_paired.filter(pl.col("change").is_in(["Newly detected", "Lost detection"])).join(artist_names, on="artist_id", how="left", validate="m:1").select(
+            pl.lit(_name).alias("Comparison"),
+            pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+            pl.col("change").alias("Change"),
+            pl.col("reference_detection_date").alias("Reference detection"),
+            pl.col("model_detection_date").alias("Tree detection"),
+        ))
+    _lost = diagnose_lost_detections(baseline_evaluation, tree_evaluation, tree_fold_results)
+    _summary = _lost.summary.join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("baseline_top3_days").alias("Baseline Top-3 days"),
+        pl.col("model_top3_days").alias("Tree Top-3 days"),
+        pl.col("best_model_rank").alias("Best tree rank"),
+    )
+    _days = _lost.daily_ranks.filter((pl.col("baseline_rank") <= 3) | (pl.col("model_rank") <= 3)).join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("scoring_date").alias("Date"),
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("baseline_rank").alias("Baseline rank"),
+        pl.col("model_rank").alias("Tree rank"),
+        (100 * pl.col("listening_share_7d")).round(2).alias("Recent share (%)"),
+        pl.col("previous_listening_count").alias("Earlier listens"),
+        pl.col("prior_listening_gap_days").alias("Prior gap (days)"),
+    )
+    mo.vstack([mo.ui.table(pl.concat(_changes), selection=None), mo.accordion({"Tree misses detected by the baseline": mo.ui.table(_summary, selection=None), "Eligible days in either Top 3": mo.ui.table(_days, selection=None)})])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     ## Is the result consistent across periods?
 
     Events are grouped by when their breakout was confirmed. Small event counts make percentages less reliable.
@@ -635,7 +692,7 @@ def _(artist_names, interaction_vs_model, mo, pl):
 
 
 @app.cell
-def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, periods, pl, recency_evaluation):
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, periods, pl, recency_evaluation, tree_evaluation):
     _baseline = baseline_evaluation.period_summary.select(
         pl.col("confirmation_period").alias("Period"),
         pl.col("scoreable_events").alias("Events"),
@@ -658,7 +715,12 @@ def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, periods
         (100 * pl.col("event_coverage_at_3")).round(1).alias("Recency coverage (%)"),
         pl.col("anticipatory_detections").alias("Recency anticipatory"),
     )
-    mo.ui.table(_baseline.join(_model, on="Period", validate="1:1").join(_interaction, on="Period", validate="1:1").join(_recency, on="Period", validate="1:1").join(_status, on="Period", validate="1:1"), selection=None)
+    _tree = tree_evaluation.period_summary.select(
+        pl.col("confirmation_period").alias("Period"),
+        (100 * pl.col("event_coverage_at_3")).round(1).alias("Tree coverage (%)"),
+        pl.col("anticipatory_detections").alias("Tree anticipatory"),
+    )
+    mo.ui.table(_baseline.join(_model, on="Period", validate="1:1").join(_interaction, on="Period", validate="1:1").join(_recency, on="Period", validate="1:1").join(_tree, on="Period", validate="1:1").join(_status, on="Period", validate="1:1"), selection=None)
     return
 
 
@@ -673,9 +735,9 @@ def _(mo):
 
 
 @app.cell
-def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl, recency_evaluation):
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl, recency_evaluation, tree_evaluation):
     _rows = []
-    for _name, _evaluation in [("7-day listening share", baseline_evaluation), ("Additive LR", model_evaluation), ("Interaction LR", interaction_evaluation), ("Recency LR", recency_evaluation)]:
+    for _name, _evaluation in [("7-day listening share", baseline_evaluation), ("Additive LR", model_evaluation), ("Interaction LR", interaction_evaluation), ("Recency LR", recency_evaluation), ("Boosted trees", tree_evaluation)]:
         _summary = _evaluation.daily_summary.row(0, named=True)
         _rows.append({
             "Approach": _name,
@@ -690,7 +752,7 @@ def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl, rec
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## What did the model learn?
+    ## What did the logistic models learn?
 
     Each weight applies to a standardized term. The interaction model uses recent share × log-transformed earlier listens. The recency model uses gap in days and a missing-history flag. A negative gap weight favours more recent earlier listening, with other inputs fixed.
     """)
@@ -721,7 +783,7 @@ def _(fold_results, interaction_fold_results, mo, pl, recency_fold_results):
 
 
 @app.cell(hide_code=True)
-def _(baseline_evaluation, interaction_evaluation, interaction_vs_model, mo, model_evaluation, paired_events, recency_evaluation, recency_vs_model):
+def _(baseline_evaluation, interaction_evaluation, interaction_vs_model, mo, model_evaluation, paired_events, recency_evaluation, recency_vs_model, tree_evaluation, tree_vs_recency):
     _baseline = baseline_evaluation.event_summary.row(0, named=True)
     _model = model_evaluation.event_summary.row(0, named=True)
     _counts = dict(paired_events.group_by("change").len().iter_rows())
@@ -729,14 +791,18 @@ def _(baseline_evaluation, interaction_evaluation, interaction_vs_model, mo, mod
     _changes = dict(interaction_vs_model.group_by("change").len().iter_rows())
     _recency = recency_evaluation.event_summary.row(0, named=True)
     _recency_changes = dict(recency_vs_model.group_by("change").len().iter_rows())
+    _tree = tree_evaluation.event_summary.row(0, named=True)
+    _tree_changes = dict(tree_vs_recency.group_by("change").len().iter_rows())
     mo.md(f"""
     ## What do these results show?
 
-    - Detected breakouts, baseline → additive → interaction → recency: **{_baseline['detected_events']} → {_model['detected_events']} → {_interaction['detected_events']} → {_recency['detected_events']}**.
-    - Anticipatory detections: **{_baseline['anticipatory_detections']} → {_model['anticipatory_detections']} → {_interaction['anticipatory_detections']} → {_recency['anticipatory_detections']}**.
+    - Detected breakouts, baseline → additive → interaction → recency → trees: **{_baseline['detected_events']} → {_model['detected_events']} → {_interaction['detected_events']} → {_recency['detected_events']} → {_tree['detected_events']}**.
+    - Anticipatory detections: **{_baseline['anticipatory_detections']} → {_model['anticipatory_detections']} → {_interaction['anticipatory_detections']} → {_recency['anticipatory_detections']} → {_tree['anticipatory_detections']}**.
     - Against the additive model, the interaction moves **{_changes.get('Earlier', 0)}** detections earlier and **{_changes.get('Later', 0)}** later; **{_changes.get('Same day', 0)}** stay unchanged.
     - It recovers **{_changes.get('Newly detected', 0)}** additive misses and loses **{_changes.get('Lost detection', 0)}** additive detections.
     - Against additive, recency moves **{_recency_changes.get('Earlier', 0)}** detections earlier and **{_recency_changes.get('Later', 0)}** later; it recovers **{_recency_changes.get('Newly detected', 0)}** misses and loses **{_recency_changes.get('Lost detection', 0)}** detections.
+
+    - Against recency LR, trees move **{_tree_changes.get('Earlier', 0)}** detections earlier and **{_tree_changes.get('Later', 0)}** later; they recover **{_tree_changes.get('Newly detected', 0)}** misses and lose **{_tree_changes.get('Lost detection', 0)}** detections.
 
     More anticipatory detections are useful only when considered alongside coverage losses and delays elsewhere. The period comparison shows whether the changes are spread through the history.
     """)
@@ -763,6 +829,8 @@ def _(
     timing_audit,
     recency_evaluation,
     recency_fold_results,
+    tree_evaluation,
+    tree_fold_results,
     record_button,
     record_comparison,
 ):
@@ -778,6 +846,8 @@ def _(
         timing_audit=timing_audit,
         recency_model=recency_evaluation,
         recency_fold_results=recency_fold_results,
+        tree_model=tree_evaluation,
+        tree_fold_results=tree_fold_results,
     )
     mo.md(f"Recorded comparison: `{_run_id}`.")
     return

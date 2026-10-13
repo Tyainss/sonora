@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+from sklearn.linear_model import LogisticRegression
+from threadpoolctl import threadpool_limits
 
 from sonora.breakout.evaluation.comparison import compare_event_detections
 from sonora.breakout.evaluation.evaluate import EvaluationResult
@@ -12,7 +14,7 @@ from sonora.breakout.features import CANDIDATE_KEYS
 from sonora.breakout.modeling import (
     MODEL_FEATURES,
     RECENCY_FEATURES,
-    LogisticFoldResult,
+    ModelFoldResult,
     model_features,
 )
 
@@ -29,7 +31,7 @@ class LostDetectionDiagnostics:
 def review_detection_changes(
     baseline: EvaluationResult,
     model: EvaluationResult,
-    fold_results: list[LogisticFoldResult],
+    fold_results: list[ModelFoldResult],
 ) -> pl.DataFrame:
     """Review every comparable event with history at entry and both detection dates.
 
@@ -69,7 +71,7 @@ def review_detection_changes(
         keys = reviewed.filter(pl.col(date_column).is_not_null()).select(
             *EVENT_KEYS, pl.col(date_column).alias("scoring_date")
         )
-        features = _explain_scores(fold_results, keys).select(
+        features = _score_context(fold_results, keys).select(
             *EVENT_KEYS,
             pl.col("listening_share_7d").alias(f"{checkpoint}_share"),
             pl.col("previous_listening_count").alias(f"{checkpoint}_previous_count"),
@@ -87,7 +89,7 @@ def review_detection_changes(
 def diagnose_lost_detections(
     baseline: EvaluationResult,
     model: EvaluationResult,
-    fold_results: list[LogisticFoldResult],
+    fold_results: list[ModelFoldResult],
 ) -> LostDetectionDiagnostics:
     """Explain model misses that the baseline detected, using fitted fold models.
 
@@ -95,6 +97,8 @@ def diagnose_lost_detections(
     Displacements list artists entering the model Top 3 from outside the baseline
     Top 3 on days the lost artist leaves it. This is a set comparison, not a
     one-to-one assignment when several artists change places.
+    Linear contributions are null for tree models; their rows retain raw
+    features, ranks and decision scores without additive feature attribution.
     """
     lost = (
         compare_event_detections(baseline.event_results, model.event_results)
@@ -155,7 +159,7 @@ def diagnose_lost_detections(
             ),
         ]
     ).unique()
-    explanations = _explain_scores(fold_results, keys)
+    explanations = _score_context(fold_results, keys)
     daily = daily.join(explanations, on=CANDIDATE_KEYS, validate="1:1")
     displacements = (
         displacements.join(explanations, on=CANDIDATE_KEYS, validate="m:1")
@@ -223,10 +227,10 @@ def diagnose_lost_detections(
     )
 
 
-def _explain_scores(
-    fold_results: list[LogisticFoldResult], keys: pl.DataFrame
+def _score_context(
+    fold_results: list[ModelFoldResult], keys: pl.DataFrame
 ) -> pl.DataFrame:
-    """Decompose decision scores with each row's original scaler and weights."""
+    """Verify original model scores and decompose only logistic predictions."""
     columns = {
         **keys.schema,
         **{feature: pl.Float64 for feature in MODEL_FEATURES},
@@ -256,6 +260,31 @@ def _explain_scores(
         )
         inputs = rows.select(features).to_numpy()
         classifier = result.model.named_steps["classifier"]
+        if not isinstance(classifier, LogisticRegression):
+            scored = rows.with_columns(
+                pl.lit(result.fold.period).alias("period"),
+                *[
+                    pl.lit(None, dtype=pl.Float64).alias(column)
+                    for column in columns
+                    if column.endswith("contribution") or column == "intercept"
+                ],
+            ).join(
+                result.scores.select(*CANDIDATE_KEYS, "model_score"),
+                on=CANDIDATE_KEYS,
+                how="left",
+                validate="1:1",
+            )
+            with threadpool_limits(limits=1, user_api="openmp"):
+                decisions = result.model.decision_function(inputs)
+            if scored["model_score"].null_count() or not np.allclose(
+                decisions,
+                scored["model_score"].to_numpy(),
+                rtol=1e-10,
+                atol=1e-12,
+            ):
+                raise ValueError("Fitted model scores do not match the scored fold")
+            pieces.append(scored.select(list(columns)))
+            continue
         contributions = result.model[:-1].transform(inputs) * classifier.coef_[0]
         explained = rows.with_columns(
             pl.lit(result.fold.period).alias("period"),

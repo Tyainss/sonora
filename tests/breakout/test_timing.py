@@ -7,7 +7,7 @@ from sklearn.pipeline import Pipeline
 
 from sonora.breakout.evaluation import EvaluationPeriod, evaluate_scores
 from sonora.breakout.evaluation.splits import build_walk_forward_folds
-from sonora.breakout.modeling import LogisticFoldResult
+from sonora.breakout.modeling import ModelFoldResult
 from sonora.breakout.timing import AFTER_START, BEFORE_START, audit_detection_timing
 
 
@@ -62,7 +62,7 @@ def timing_comparison():
         EvaluationPeriod("second", dt.date(2022, 1, 21), dt.date(2022, 3, 1), True),
     ]
     folds = [
-        LogisticFoldResult(fold, Pipeline([]), fold.scoring)
+        ModelFoldResult(fold, Pipeline([]), fold.scoring)
         for fold in build_walk_forward_folds(data, periods)
     ]
     events = pl.DataFrame(

@@ -12,10 +12,12 @@ from sonora.breakout.evaluation import EvaluationPeriod, evaluate_scores, rank_s
 from sonora.breakout.modeling import (
     MODEL_FEATURES,
     RECENCY_FEATURES,
+    fit_boosted_trees,
     fit_logistic_regression,
     model_features,
+    run_boosted_tree_walk_forward,
     run_logistic_walk_forward,
-    score_logistic_regression,
+    score_model,
 )
 
 KEYS = ["user_id", "artist_id", "scoring_date"]
@@ -84,11 +86,11 @@ def test_scoring_keeps_fitted_preprocessing_and_ignores_target_metadata(interact
     means = model.named_steps["scale"].mean_.copy()
     scales = model.named_steps["scale"].scale_.copy()
     rows = scoring().with_columns(pl.lit(1_000_000).alias("previous_listening_count"))
-    result = score_logistic_regression(model, rows, baseline())
+    result = score_model(model, rows, baseline())
     altered = rows.with_columns(
         pl.lit(True).alias("target_60d"), pl.lit(-1000).alias("unrelated_metadata")
     )
-    other = score_logistic_regression(model, altered, baseline())
+    other = score_model(model, altered, baseline())
     assert_allclose(model.named_steps["scale"].mean_, means)
     assert_allclose(model.named_steps["scale"].scale_, scales)
     assert_allclose(result["model_score"].to_numpy(), other["model_score"].to_numpy())
@@ -113,12 +115,12 @@ def test_interaction_uses_share_times_logged_count_before_training_only_scaling(
 
 def test_exact_ties_follow_baseline_but_even_small_model_differences_take_priority():
     rows = scoring()
-    result = score_logistic_regression(share_scores(), rows, baseline().reverse())
+    result = score_model(share_scores(), rows, baseline().reverse())
     assert result["artist_id"].to_list() == ["c", "b", "a", "a"]
     assert result["score"].to_list() == [-1.0, -2.0, -3.0, -1.0]
     assert result["baseline_score"].to_list() == [-3.0, -1.0, -2.0, -1.0]
     assert rank_scores(result, rows)["rank"].to_list() == [1, 2, 3, 1]
-    shuffled = score_logistic_regression(share_scores(), rows.reverse(), baseline())
+    shuffled = score_model(share_scores(), rows.reverse(), baseline())
     assert result.equals(shuffled)
 
 
@@ -220,13 +222,11 @@ def test_invalid_features_are_rejected_before_training(column, value):
 
 def test_missing_baseline_candidates_are_rejected():
     with pytest.raises(ValueError, match="Missing scores"):
-        score_logistic_regression(share_scores(), scoring(), baseline().head(3))
+        score_model(share_scores(), scoring(), baseline().head(3))
 
 
 def test_empty_scoring_preserves_the_evaluator_schema():
-    result = score_logistic_regression(
-        share_scores(), scoring().head(0), baseline().head(0)
-    )
+    result = score_model(share_scores(), scoring().head(0), baseline().head(0))
     assert result.is_empty()
     assert result.schema["score"] == pl.Float64
     assert rank_scores(result, scoring().head(0)).is_empty()
@@ -277,7 +277,7 @@ def test_recency_median_and_scaling_use_training_only_and_keep_missing_artists()
         pl.Series("previous_listening_count", [0, 0, 2, 0]),
         pl.Series("prior_listening_gap_days", [None, None, 10_000.0, None]),
     )
-    result = score_logistic_regression(model, candidates, baseline())
+    result = score_model(model, candidates, baseline())
     assert result.height == candidates.height
     assert np.isfinite(result["model_score"].to_numpy()).all()
     assert transform.named_transformers_["prior_gap"].statistics_[0] == 40
@@ -300,7 +300,7 @@ def test_recency_indicator_is_present_when_missing_history_first_appears_at_scor
     )
     assert terms.shape == (4, 4)
     assert terms[:, 3].tolist() == [1, 1, 1, 1]
-    assert score_logistic_regression(model, candidates, baseline()).height == 4
+    assert score_model(model, candidates, baseline()).height == 4
 
 
 @pytest.mark.parametrize("value", [None, 7, float("inf"), float("nan")])
@@ -325,3 +325,76 @@ def test_recency_requires_an_observed_training_gap_and_excludes_interaction():
         fit_logistic_regression(rows, recency=True)
     with pytest.raises(ValueError, match="separate model comparisons"):
         fit_logistic_regression(recency_training(), interaction=True, recency=True)
+
+
+def test_trees_use_raw_inputs_native_missingness_and_fixed_training_rounds():
+    rows = recency_training()
+    model = fit_boosted_trees(rows)
+    classifier = model.named_steps["classifier"]
+    assert list(model.named_steps) == ["classifier"]
+    assert model_features(model) == RECENCY_FEATURES
+    assert classifier.n_features_in_ == 3
+    assert classifier.n_iter_ == 100
+    assert classifier.do_early_stopping_ is False
+    assert classifier.max_depth == 3
+    assert classifier.max_leaf_nodes == 7
+    assert classifier.min_samples_leaf == 100
+    candidates = scoring().with_columns(
+        pl.lit(0).alias("previous_listening_count"),
+        pl.lit(None, dtype=pl.Float64).alias("prior_listening_gap_days"),
+    )
+    result = score_model(model, candidates, baseline())
+    assert result.height == candidates.height
+    assert np.isfinite(result["model_score"].to_numpy()).all()
+    assert result["score"].to_list() == [-1, -2, -3, -1]
+    with pytest.raises(ValueError, match="observed training gap"):
+        fit_boosted_trees(
+            rows.with_columns(
+                pl.lit(0).alias("previous_listening_count"),
+                pl.lit(None, dtype=pl.Float64).alias("prior_listening_gap_days"),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "column,value",
+    [("has_full_horizon", False), ("target_60d", None), ("target_60d", True)],
+)
+def test_tree_training_rejects_unknown_or_unresolved_labels_and_single_class(
+    column, value
+):
+    rows = recency_training().with_columns(
+        pl.lit(value, dtype=pl.Boolean).alias(column)
+    )
+    with pytest.raises(ValueError, match="Training requires"):
+        fit_boosted_trees(rows)
+
+
+def test_tree_walk_forward_uses_the_same_resolved_training_boundaries():
+    rows = recency_training().with_columns(
+        pl.Series("user_id", ["u"] * 8),
+        pl.Series("artist_id", [f"a{i}" for i in range(8)]),
+        pl.Series(
+            "scoring_date",
+            [dt.date(2021, 9, 1)] * 4
+            + [dt.date(2022, 1, 1)] * 2
+            + [dt.date(2022, 7, 1)] * 2,
+        ),
+    )
+    rows = rows.with_columns(
+        (pl.col("scoring_date") + dt.timedelta(days=60)).alias("horizon_end_date")
+    )
+    periods = [
+        EvaluationPeriod("first", dt.date(2022, 1, 1), dt.date(2022, 6, 30), False),
+        EvaluationPeriod("second", dt.date(2022, 7, 1), dt.date(2022, 7, 1), True),
+    ]
+    candidates = rows.filter(pl.col("scoring_date") >= dt.date(2022, 1, 1))
+    baseline_scores = candidates.select(
+        *KEYS, pl.col("listening_share_7d").alias("score")
+    )
+    expected = run_logistic_walk_forward(rows, periods, baseline_scores)
+    actual = run_boosted_tree_walk_forward(rows, periods, baseline_scores)
+    for tree, logistic in zip(actual, expected, strict=True):
+        assert tree.fold.training.equals(logistic.fold.training)
+        assert tree.fold.scoring.equals(logistic.fold.scoring)
+        assert tree.model.named_steps["classifier"].n_iter_ == 100

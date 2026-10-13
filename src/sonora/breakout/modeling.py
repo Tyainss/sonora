@@ -1,11 +1,14 @@
-"""Fold-specific logistic regression and deterministic daily scoring."""
+"""Fold-specific classifiers and deterministic daily scoring."""
 
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
 import numpy as np
 import polars as pl
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.impute import MissingIndicator, SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -15,6 +18,7 @@ from sklearn.preprocessing import (
     PolynomialFeatures,
     StandardScaler,
 )
+from threadpoolctl import threadpool_limits
 
 from sonora.breakout.evaluation.periods import EvaluationPeriod
 from sonora.breakout.evaluation.rankings import rank_scores
@@ -26,7 +30,7 @@ RECENCY_FEATURES = (*MODEL_FEATURES, "prior_listening_gap_days")
 
 
 @dataclass(frozen=True)
-class LogisticFoldResult:
+class ModelFoldResult:
     """Training boundaries, fitted preprocessing/model, and one fold's scores."""
 
     fold: WalkForwardFold
@@ -45,23 +49,7 @@ def fit_logistic_regression(
     if interaction and recency:
         raise ValueError("Interaction and recency are separate model comparisons")
     inputs = _model_inputs(training, recency=recency)
-    required = {"target_60d", "has_full_horizon"}
-    if required - set(training.columns):
-        raise ValueError("Training requires target_60d and has_full_horizon")
-    if training.is_empty():
-        raise ValueError("Logistic regression requires non-empty training data")
-    if (
-        training.schema["target_60d"] != pl.Boolean
-        or training.schema["has_full_horizon"] != pl.Boolean
-        or training["target_60d"].null_count()
-        or training["has_full_horizon"].null_count()
-        or not training["has_full_horizon"].all()
-    ):
-        raise ValueError("Training requires Boolean labels and fully observed horizons")
-    if training["target_60d"].n_unique() != 2:
-        raise ValueError("Logistic regression requires both target classes")
-    if recency and training["prior_listening_gap_days"].null_count() == training.height:
-        raise ValueError("Recency requires at least one observed training gap")
+    _validate_training(training, require_gap=recency)
 
     model = Pipeline(
         [
@@ -108,7 +96,40 @@ def fit_logistic_regression(
     return model
 
 
-def score_logistic_regression(
+def fit_boosted_trees(training: pl.DataFrame) -> Pipeline:
+    """Fit fixed, small histogram trees on three raw features with native NaNs.
+
+    Automatic random validation and early stopping are disabled. Every fold
+    fits all its resolved training rows for the same number of rounds.
+    At least one observed training gap is required.
+    """
+    inputs = _model_inputs(training, recency=True)
+    _validate_training(training, require_gap=True)
+    model = Pipeline(
+        [
+            (
+                "classifier",
+                HistGradientBoostingClassifier(
+                    learning_rate=0.05,
+                    max_iter=100,
+                    max_leaf_nodes=7,
+                    max_depth=3,
+                    min_samples_leaf=100,
+                    l2_regularization=1.0,
+                    categorical_features=None,
+                    early_stopping=False,
+                    random_state=0,
+                    class_weight=None,
+                ),
+            ),
+        ]
+    )
+    with threadpool_limits(limits=1, user_api="openmp"):
+        model.fit(inputs, training["target_60d"].to_numpy())
+    return model
+
+
+def score_model(
     model: Pipeline,
     candidates: pl.DataFrame,
     baseline_scores: pl.DataFrame,
@@ -130,7 +151,8 @@ def score_logistic_regression(
             pl.lit(None, dtype=pl.Float64).alias(column)
             for column in ["model_score", "baseline_score", "score"]
         )
-    decisions = model.decision_function(inputs)
+    with threadpool_limits(limits=1, user_api="openmp"):
+        decisions = model.decision_function(inputs)
     if not np.isfinite(decisions).all():
         raise ValueError("Model decision scores must be finite")
     return (
@@ -160,12 +182,35 @@ def run_logistic_walk_forward(
     *,
     interaction: bool = False,
     recency: bool = False,
-) -> list[LogisticFoldResult]:
+) -> list[ModelFoldResult]:
     """Fit a fresh pipeline for each non-empty scoring fold using existing splits.
 
     Period selection belongs to the caller. Baseline scores cover exactly
     the folds' scoring rows.
     """
+    return _run_walk_forward(
+        data,
+        periods,
+        baseline_scores,
+        partial(fit_logistic_regression, interaction=interaction, recency=recency),
+    )
+
+
+def run_boosted_tree_walk_forward(
+    data: pl.DataFrame,
+    periods: list[EvaluationPeriod],
+    baseline_scores: pl.DataFrame,
+) -> list[ModelFoldResult]:
+    """Fit the same fixed tree configuration on each expanding training fold."""
+    return _run_walk_forward(data, periods, baseline_scores, fit_boosted_trees)
+
+
+def _run_walk_forward(
+    data: pl.DataFrame,
+    periods: list[EvaluationPeriod],
+    baseline_scores: pl.DataFrame,
+    fit_model: Callable[[pl.DataFrame], Pipeline],
+) -> list[ModelFoldResult]:
     folds = [
         fold for fold in build_walk_forward_folds(data, periods) if fold.scoring_rows
     ]
@@ -175,17 +220,15 @@ def run_logistic_walk_forward(
     rank_scores(baseline_scores, expected)
     results = []
     for fold in folds:
-        model = fit_logistic_regression(
-            fold.training, interaction=interaction, recency=recency
-        )
+        model = fit_model(fold.training)
         baseline = baseline_scores.join(
             fold.scoring.select(CANDIDATE_KEYS), on=CANDIDATE_KEYS, how="semi"
         )
         results.append(
-            LogisticFoldResult(
+            ModelFoldResult(
                 fold=fold,
                 model=model,
-                scores=score_logistic_regression(model, fold.scoring, baseline),
+                scores=score_model(model, fold.scoring, baseline),
             )
         )
     return results
@@ -193,11 +236,38 @@ def run_logistic_walk_forward(
 
 def model_features(model: Pipeline) -> tuple[str, ...]:
     """Return the fitted pipeline's raw input columns in training order."""
+    if isinstance(model.named_steps["classifier"], HistGradientBoostingClassifier):
+        return RECENCY_FEATURES
     return (
         RECENCY_FEATURES
         if "prior_gap" in model.named_steps["transform"].named_transformers_
         else MODEL_FEATURES
     )
+
+
+def _validate_training(training: pl.DataFrame, *, require_gap: bool = False) -> None:
+    required = {"target_60d", "has_full_horizon"}
+    if required - set(training.columns):
+        raise ValueError("Training requires target_60d and has_full_horizon")
+    if training.is_empty():
+        raise ValueError("Training requires non-empty data")
+    if (
+        training.schema["target_60d"] != pl.Boolean
+        or training.schema["has_full_horizon"] != pl.Boolean
+        or training["target_60d"].null_count()
+        or training["has_full_horizon"].null_count()
+        or not training["has_full_horizon"].all()
+    ):
+        raise ValueError("Training requires Boolean labels and fully observed horizons")
+    if training["target_60d"].n_unique() != 2:
+        raise ValueError("Training requires both target classes")
+    if (
+        require_gap
+        and training["prior_listening_gap_days"].null_count() == training.height
+    ):
+        raise ValueError(
+            "Recency-based models require at least one observed training gap"
+        )
 
 
 def _model_inputs(rows: pl.DataFrame, *, recency: bool = False) -> np.ndarray:

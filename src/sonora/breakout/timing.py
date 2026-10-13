@@ -7,7 +7,7 @@ import polars as pl
 from sonora.breakout.evaluation.evaluate import EvaluationResult
 from sonora.breakout.evaluation.events import EVENT_COLUMNS, EVENT_KEYS, TOP_K
 from sonora.breakout.features import CANDIDATE_KEYS
-from sonora.breakout.modeling import MODEL_FEATURES, LogisticFoldResult
+from sonora.breakout.modeling import MODEL_FEATURES, ModelFoldResult
 
 BEFORE_START = "Before start"
 AFTER_START = "Started; awaiting confirmation"
@@ -24,7 +24,7 @@ class TimingAudit:
 
 def audit_detection_timing(
     evaluations: dict[str, EvaluationResult],
-    fold_results: list[LogisticFoldResult],
+    fold_results: list[ModelFoldResult],
     events: pl.DataFrame,
 ) -> TimingAudit:
     """Separate positive days before start from start through confirmation-1.

@@ -17,6 +17,7 @@ from sonora.breakout.evaluation.holdout import load_or_create_holdout
 from sonora.breakout.modeling import (
     MODEL_FEATURES,
     RECENCY_FEATURES,
+    run_boosted_tree_walk_forward,
     run_logistic_walk_forward,
 )
 from sonora.breakout.timing import TimingAudit
@@ -379,6 +380,18 @@ def test_compared_models_record_metrics_reviews_and_reloadable_pipelines(
         oos_start=periods[0].scoring_start,
         oos_end=periods[-1].scoring_end,
     )
+    tree_folds = run_boosted_tree_walk_forward(
+        recency_data,
+        periods,
+        baseline.rankings.select("user_id", "artist_id", "scoring_date", "score"),
+    )
+    tree = evaluate_scores(
+        pl.concat([r.scores for r in tree_folds]),
+        pl.concat([r.fold.scoring for r in tree_folds]),
+        pl.read_parquet(paths.breakout_events),
+        oos_start=periods[0].scoring_start,
+        oos_end=periods[-1].scoring_end,
+    )
     timing = TimingAudit(
         training_summary=pl.DataFrame({"period": ["2022 H1"], "positive_days": [1]}),
         ranking_summary=pl.DataFrame(
@@ -399,6 +412,8 @@ def test_compared_models_record_metrics_reviews_and_reloadable_pipelines(
         timing_audit=timing,
         recency_model=recency,
         recency_fold_results=recency_folds,
+        tree_model=tree,
+        tree_fold_results=tree_folds,
     )
     client = MlflowClient(
         tracking_uri=f"sqlite:///{(root / 'artifacts/mlflow/mlflow.db').as_posix()}"
@@ -453,6 +468,38 @@ def test_compared_models_record_metrics_reviews_and_reloadable_pipelines(
         restored.decision_function(inputs), result.model.decision_function(inputs)
     )
     assert restored.named_steps["classifier"].n_features_in_ == 4
+    assert run.data.params["tree"] == "hist_gradient_boosting"
+    assert run.data.params["tree.terms"] == "share,previous_count,prior_gap_days"
+    assert run.data.params["tree.previous_count_transform"] == "none"
+    assert run.data.params["tree.early_stopping"] == "False"
+    assert "tree_vs_recency.paired.same_day" in run.data.metrics
+    result = tree_folds[0]
+    local = client.download_artifacts(run_id, "tree/folds/2022_H1/model")
+    restored = mlflow.sklearn.load_model(local)
+    inputs = result.fold.scoring.select(
+        pl.col(RECENCY_FEATURES).cast(pl.Float64)
+    ).to_numpy()
+    np.testing.assert_array_equal(
+        restored.decision_function(inputs), result.model.decision_function(inputs)
+    )
+    review = pl.read_parquet(
+        client.download_artifacts(run_id, "tree/diagnostics/event_review.parquet")
+    )
+    assert review.height == 1
+
+
+def test_tree_evaluation_requires_its_fitted_models_before_recording(comparison):
+    root, _, _, _, context, folds, (baseline, model) = comparison
+    with pytest.raises(ValueError, match="supplied together"):
+        record_comparison(
+            baseline=baseline,
+            model=model,
+            fold_results=folds,
+            context=context,
+            project_root=root,
+            tree_model=model,
+        )
+    assert not (root / "artifacts/mlflow").exists()
 
 
 def test_recency_evaluation_requires_its_fitted_models_before_recording(comparison):

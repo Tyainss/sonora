@@ -15,6 +15,8 @@ import polars as pl
 from mlflow import MlflowClient
 from mlflow.environment_variables import MLFLOW_DISABLE_TELEMETRY
 from mlflow.models import infer_signature
+from sklearn.ensemble import HistGradientBoostingClassifier
+from threadpoolctl import threadpool_limits
 
 from sonora.breakout.diagnostics import (
     diagnose_lost_detections,
@@ -26,7 +28,7 @@ from sonora.breakout.evaluation.events import TOP_K
 from sonora.breakout.features import CANDIDATE_KEYS, RECENT_SHARE_DAYS
 from sonora.breakout.modeling import (
     RECENCY_FEATURES,
-    LogisticFoldResult,
+    ModelFoldResult,
     model_features,
 )
 from sonora.breakout.targets import DEFAULT_HORIZON_DAYS
@@ -35,7 +37,15 @@ from sonora.data.paths import DataPaths
 
 EXPERIMENT_NAME = "breakout-development-comparison"
 TRACKING_DIRECTORY = Path("artifacts/mlflow")
-MODEL_PACKAGES = ("mlflow", "scikit-learn", "numpy", "scipy", "cloudpickle", "skops")
+MODEL_PACKAGES = (
+    "mlflow",
+    "scikit-learn",
+    "numpy",
+    "scipy",
+    "cloudpickle",
+    "skops",
+    "threadpoolctl",
+)
 
 
 @dataclass(frozen=True)
@@ -129,16 +139,18 @@ def record_comparison(
     *,
     baseline: EvaluationResult,
     model: EvaluationResult,
-    fold_results: list[LogisticFoldResult],
+    fold_results: list[ModelFoldResult],
     context: ComparisonContext,
     project_root: Path,
     interaction_model: EvaluationResult | None = None,
-    interaction_fold_results: list[LogisticFoldResult] | None = None,
+    interaction_fold_results: list[ModelFoldResult] | None = None,
     timing_audit: TimingAudit | None = None,
     recency_model: EvaluationResult | None = None,
-    recency_fold_results: list[LogisticFoldResult] | None = None,
+    recency_fold_results: list[ModelFoldResult] | None = None,
+    tree_model: EvaluationResult | None = None,
+    tree_fold_results: list[ModelFoldResult] | None = None,
 ) -> str:
-    """Record the baseline and compared logistic models in one development run.
+    """Record the baseline and compared classifiers in one development run.
 
     Optional timing views are saved alongside the comparison diagnostics.
     Recording disables MLflow usage telemetry and preserves the active run/URI.
@@ -152,11 +164,15 @@ def record_comparison(
         raise ValueError(
             "Recency evaluation and fitted folds must be supplied together"
         )
+    if (tree_model is None) != (tree_fold_results is None):
+        raise ValueError("Tree evaluation and fitted folds must be supplied together")
     approaches = [("model", model, fold_results)]
     if interaction_model is not None:
         approaches.append(("interaction", interaction_model, interaction_fold_results))
     if recency_model is not None:
         approaches.append(("recency", recency_model, recency_fold_results))
+    if tree_model is not None:
+        approaches.append(("tree", tree_model, tree_fold_results))
     baseline_keys = baseline.rankings.select(CANDIDATE_KEYS).sort(CANDIDATE_KEYS)
     development_end = dt.date.fromisoformat(
         context.holdout["boundaries"]["development_end"]
@@ -203,6 +219,17 @@ def record_comparison(
                 ),
             )
         )
+    if tree_model is not None:
+        for name, reference in [("model", model), ("recency", recency_model)]:
+            if reference is not None:
+                paired_results.append(
+                    (
+                        f"tree_vs_{name}",
+                        compare_event_detections(
+                            reference.event_results, tree_model.event_results
+                        ),
+                    )
+                )
     MLFLOW_DISABLE_TELEMETRY.set(True)
     storage = (project_root / TRACKING_DIRECTORY).resolve()
     storage.mkdir(parents=True, exist_ok=True)
@@ -222,7 +249,8 @@ def record_comparison(
         tags={
             "mlflow.runName": "listening-share-vs-logistic-regression"
             + ("-and-interaction" if interaction_model is not None else "")
-            + ("-and-recency" if recency_model is not None else ""),
+            + ("-and-recency" if recency_model is not None else "")
+            + ("-and-trees" if tree_model is not None else ""),
             "mlflow.source.git.commit": context.git_commit,
             "git.dirty": str(context.git_dirty).lower(),
             "evaluation.scope": "development",
@@ -250,16 +278,24 @@ def record_comparison(
         }
         for name, _, results in approaches:
             has_interaction = "interaction" in results[0].model.named_steps
+            classifier = results[0].model.named_steps["classifier"]
+            is_tree = isinstance(classifier, HistGradientBoostingClassifier)
             features = model_features(results[0].model)
-            has_recency = features == RECENCY_FEATURES
+            has_recency = not is_tree and features == RECENCY_FEATURES
             params.update(
                 {
-                    name: "logistic_regression",
+                    name: "hist_gradient_boosting"
+                    if is_tree
+                    else "logistic_regression",
                     f"{name}.features": ",".join(features),
-                    f"{name}.previous_count_transform": "log1p",
-                    f"{name}.scaling": "StandardScaler fitted per training fold",
+                    f"{name}.previous_count_transform": "none" if is_tree else "log1p",
+                    f"{name}.scaling": "none"
+                    if is_tree
+                    else "StandardScaler fitted per training fold",
                     f"{name}.interaction": has_interaction,
-                    f"{name}.terms": "share,log1p_count"
+                    f"{name}.terms": "share,previous_count,prior_gap_days"
+                    if is_tree
+                    else "share,log1p_count"
                     + (",share_x_log1p_count" if has_interaction else "")
                     + (",prior_gap_days,no_earlier_history" if has_recency else ""),
                     **{
@@ -278,9 +314,13 @@ def record_comparison(
                 params[f"{name}.gap_units"] = (
                     "days since latest listen strictly before D-7"
                 )
+            if is_tree:
+                params[f"{name}.gap_imputation"] = "none; native missing-value handling"
+                params[f"{name}.openmp_threads"] = 1
             if any(
                 ("interaction" in result.model.named_steps) != has_interaction
                 or model_features(result.model) != features
+                or type(result.model.named_steps["classifier"]) is not type(classifier)
                 for result in results
             ):
                 raise ValueError(
@@ -366,6 +406,10 @@ def record_comparison(
                 for result in results:
                     fold = result.fold
                     features = model_features(result.model)
+                    is_tree = isinstance(
+                        result.model.named_steps["classifier"],
+                        HistGradientBoostingClassifier,
+                    )
                     inputs = (
                         fold.scoring.select(pl.col(features).cast(pl.Float64))
                         .head(5)
@@ -374,14 +418,20 @@ def record_comparison(
                     folder = base / "folds" / fold.period.replace(" ", "_")
                     folder.mkdir(parents=True)
                     result.scores.write_parquet(folder / "scores.parquet")
+                    with threadpool_limits(limits=1, user_api="openmp"):
+                        predictions = result.model.predict(inputs)
                     mlflow.sklearn.save_model(
                         result.model,
                         folder / "model",
                         serialization_format=mlflow.sklearn.SERIALIZATION_FORMAT_SKOPS,
-                        skops_trusted_types=["numpy.dtype"]
-                        if features == RECENCY_FEATURES
-                        else None,
-                        signature=infer_signature(inputs, result.model.predict(inputs)),
+                        skops_trusted_types=[
+                            "sklearn.ensemble._hist_gradient_boosting.predictor.TreePredictor"
+                        ]
+                        if is_tree
+                        else (
+                            ["numpy.dtype"] if features == RECENCY_FEATURES else None
+                        ),
+                        signature=infer_signature(inputs, predictions),
                         input_example=inputs,
                         pip_requirements=context.model_requirements,
                         metadata={
@@ -413,7 +463,7 @@ def record_comparison(
                                         .statistics_[0]
                                     )
                                 }
-                                if features == RECENCY_FEATURES
+                                if not is_tree and features == RECENCY_FEATURES
                                 else {}
                             ),
                         }

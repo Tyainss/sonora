@@ -14,8 +14,9 @@ from sonora.breakout.evaluation import EvaluationPeriod, evaluate_scores
 from sonora.breakout.modeling import (
     MODEL_FEATURES,
     fit_logistic_regression,
+    run_boosted_tree_walk_forward,
     run_logistic_walk_forward,
-    score_logistic_regression,
+    score_model,
 )
 
 KEYS = ["user_id", "artist_id", "scoring_date"]
@@ -224,6 +225,66 @@ def test_recency_contributions_reconstruct_scores_with_missing_history(compariso
     )
 
 
+def test_tree_score_context_retains_ranks_and_raw_features_without_linear_attribution(
+    comparison,
+):
+    baseline, _, original = comparison
+    training = original[-1].fold.training
+    expanded = pl.concat(
+        [
+            training.with_columns(
+                (pl.col("artist_id") + f"-copy-{i}").alias("artist_id")
+            )
+            for i in range(50)
+        ]
+    )
+    data = pl.concat([expanded, *[r.fold.scoring for r in original]]).with_columns(
+        pl.when(pl.col("previous_listening_count") == 0)
+        .then(None)
+        .otherwise(20)
+        .alias("prior_listening_gap_days")
+    )
+    periods = [
+        EvaluationPeriod(
+            r.fold.period, r.fold.scoring_start, r.fold.scoring_end, r.fold.is_partial
+        )
+        for r in original
+    ]
+    folds = run_boosted_tree_walk_forward(
+        data, periods, baseline.rankings.select(*KEYS, "score")
+    )
+    model = evaluate_scores(
+        pl.concat([r.scores for r in folds]),
+        pl.concat([r.fold.scoring for r in folds]),
+        baseline.event_results,
+        oos_start=periods[0].scoring_start,
+        oos_end=periods[-1].scoring_end,
+    )
+    diagnostics = diagnose_lost_detections(baseline, model, folds)
+    assert diagnostics.displacements.height > 0
+    for column in [
+        "share_contribution",
+        "previous_count_contribution",
+        "prior_gap_contribution",
+        "no_history_contribution",
+        "intercept",
+    ]:
+        assert (
+            diagnostics.daily_ranks[column].null_count()
+            == diagnostics.daily_ranks.height
+        )
+    assert diagnostics.displacements["model_advantage"].min() > 0
+    assert (
+        diagnostics.displacements["share_advantage"].null_count()
+        == diagnostics.displacements.height
+    )
+    review = review_detection_changes(baseline, model, folds)
+    assert review.height == 1
+    folds[0].model.named_steps["classifier"]._baseline_prediction += 1
+    with pytest.raises(ValueError, match="scores do not match"):
+        diagnose_lost_detections(baseline, model, folds)
+
+
 def test_mismatched_daily_candidates_are_rejected(comparison):
     baseline, model, folds = comparison
     model = replace(model, rankings=model.rankings.slice(1))
@@ -254,7 +315,7 @@ def test_interaction_contributions_reconstruct_original_fold_scores(comparison):
     results = []
     for original in folds:
         model = fit_logistic_regression(original.fold.training, interaction=True)
-        scores = score_logistic_regression(
+        scores = score_model(
             model,
             original.fold.scoring,
             baseline.rankings.select(*KEYS, "score").join(
