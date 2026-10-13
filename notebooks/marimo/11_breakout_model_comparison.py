@@ -28,6 +28,7 @@ def _():
     from sonora.breakout.evaluation.comparison import compare_event_detections
     from sonora.breakout.evaluation.holdout import load_or_create_holdout
     from sonora.breakout.modeling import run_logistic_walk_forward
+    from sonora.breakout.timing import audit_detection_timing
     from sonora.breakout.tracking import capture_comparison_context, record_comparison
     from sonora.data.paths import DEFAULT_DATA_PATHS
 
@@ -35,6 +36,7 @@ def _():
     return (
         EvaluationPeriod,
         Path,
+        audit_detection_timing,
         build_evaluation_periods,
         build_modeling_data,
         build_walk_forward_folds,
@@ -248,6 +250,102 @@ def _(baseline_evaluation, mo, model_evaluation):
     All three approaches evaluate the same **{_baseline['scoreable_events']}** scoreable events. **{_baseline['anticipatable_events']}** had an eligible day before breakout listening started.
 
     The median timing uses detected events only. Positive days mean detection before breakout starts; negative days mean detection after it starts. The paired comparison below shows timing changes for the same events.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Do the positive labels reward anticipation or an ongoing breakout?
+
+    A positive artist-day is an eligible artist on a date whose first confirmation falls within the next 60 days. **Before start** means before breakout listening begins; **Started; awaiting confirmation** includes the start date through the day before confirmation.
+
+    The start date is used only for retrospective analysis. It is not a model input. Expanding training folds reuse history, so their counts must not be added together.
+    """)
+    return
+
+
+@app.cell
+def _(audit_detection_timing, baseline_evaluation, development_events, fold_results, interaction_evaluation, model_evaluation):
+    timing_audit = audit_detection_timing(
+        {"baseline": baseline_evaluation, "additive": model_evaluation, "interaction": interaction_evaluation},
+        fold_results,
+        development_events,
+    )
+    return (timing_audit,)
+
+
+@app.cell
+def _(mo, pl, timing_audit):
+    _before = timing_audit.training_summary.filter(pl.col("stage") == "Before start").select(
+        pl.col("period").alias("Period"),
+        pl.col("positive_days").alias("Before start: positive days"),
+        (100 * pl.col("positive_day_share")).round(1).alias("Before start: share (%)"),
+        (100 * pl.col("zero_share_fraction")).round(1).alias("Before start: no recent plays (%)"),
+    )
+    _started = timing_audit.training_summary.filter(pl.col("stage") == "Started; awaiting confirmation").select(
+        pl.col("period").alias("Period"),
+        pl.col("positive_days").alias("Started: positive days"),
+    )
+    mo.ui.table(_before.join(_started, on="Period", how="left", validate="1:1"), selection=None, page_size=max(1, _before.height))
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pl, timing_audit):
+    _before = timing_audit.training_summary.filter(pl.col("stage") == "Before start")
+    mo.stop(_before.is_empty(), mo.md("There are no positive training days before breakout start."))
+    _latest = _before.sort("period").tail(1).row(0, named=True)
+    mo.md(f"""
+    In the latest fold, **{_latest['positive_day_share']:.1%}** of positive training days precede breakout start. Of those days, **{_latest['zero_share_fraction']:.1%}** have no plays of that artist in the previous seven days.
+
+    Positive labels reward both anticipation and an ongoing breakout. Their composition alone does not establish which stage drives the fitted model.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## How do rankings perform before and after breakout starts?
+
+    These rows cover the same fully comparable events as the event comparison. **Top-3 days (%)** counts each eligible positive artist-day. **Mean per-event Top-3 days (%)** first calculates that rate for each event, then averages the rates equally. Neither is an event detection rate: detection still requires enough distinct Top-3 days.
+    """)
+    return
+
+
+@app.cell
+def _(mo, pl, timing_audit):
+    _context = timing_audit.ranking_summary.filter(pl.col("approach") == "baseline").select(
+        pl.col("stage").alias("Stage"),
+        pl.col("breakout_artists").alias("Events with eligible days"),
+        pl.col("positive_days").alias("Eligible artist-days"),
+        (100 * pl.col("zero_share_fraction")).round(1).alias("No recent plays (%)"),
+        (100 * pl.col("median_share")).round(2).alias("Median recent share (%)"),
+        pl.col("median_previous_count").alias("Median earlier listens"),
+    )
+    _ranks = timing_audit.ranking_summary.select(
+        pl.col("approach").alias("Approach"),
+        pl.col("stage").alias("Stage"),
+        pl.col("top3_days").alias("Top-3 artist-days"),
+        (100 * pl.col("top3_day_rate")).round(1).alias("Top-3 days (%)"),
+        (100 * pl.col("mean_event_top3_day_rate")).round(1).alias("Mean per-event Top-3 days (%)"),
+        pl.col("median_rank").alias("Median rank"),
+    )
+    mo.vstack([mo.ui.table(_context, selection=None), mo.ui.table(_ranks, selection=None)])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pl, timing_audit):
+    _days = timing_audit.ranking_summary.filter((pl.col("approach") == "baseline") & (pl.col("stage") == "Before start"))
+    mo.stop(_days.is_empty(), mo.md("These events have no eligible scoring days before breakout start."))
+    _before = _days.row(0, named=True)
+    mo.md(f"""
+    **{_before['zero_share_days']:,} of {_before['positive_days']:,}** eligible pre-start artist-days have no recent plays. The two model inputs then reduce to zero recent share and an earlier listening count.
+
+    Both stages contribute to the existing daily ranking metrics. These results show where ranking succeeds, but do not establish that changing the training labels would improve anticipation. The stage populations and listening conditions differ.
     """)
     return
 
@@ -583,6 +681,7 @@ def _(
     model_evaluation,
     interaction_evaluation,
     interaction_fold_results,
+    timing_audit,
     record_button,
     record_comparison,
 ):
@@ -595,6 +694,7 @@ def _(
         project_root=Path("."),
         interaction_model=interaction_evaluation,
         interaction_fold_results=interaction_fold_results,
+        timing_audit=timing_audit,
     )
     mo.md(f"Recorded comparison: `{_run_id}`.")
     return

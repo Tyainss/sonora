@@ -26,6 +26,7 @@ from sonora.breakout.evaluation.events import TOP_K
 from sonora.breakout.features import CANDIDATE_KEYS, RECENT_SHARE_DAYS
 from sonora.breakout.modeling import MODEL_FEATURES, LogisticFoldResult
 from sonora.breakout.targets import DEFAULT_HORIZON_DAYS
+from sonora.breakout.timing import TimingAudit
 from sonora.data.paths import DataPaths
 
 EXPERIMENT_NAME = "breakout-development-comparison"
@@ -129,9 +130,11 @@ def record_comparison(
     project_root: Path,
     interaction_model: EvaluationResult | None = None,
     interaction_fold_results: list[LogisticFoldResult] | None = None,
+    timing_audit: TimingAudit | None = None,
 ) -> str:
     """Record the baseline, additive model, and optional interaction in one run.
 
+    Optional timing views are saved alongside the comparison diagnostics.
     Recording disables MLflow usage telemetry and preserves the active run/URI.
     Undefined metrics stay null in result artifacts and are omitted from metrics.
     """
@@ -253,6 +256,13 @@ def record_comparison(
             client.log_param(run_id, key, str(value))
         with TemporaryDirectory(prefix="sonora-comparison-") as temporary:
             destination = Path(temporary)
+            if timing_audit is not None:
+                directory = destination / "diagnostics/timing"
+                directory.mkdir(parents=True)
+                for table in ["training_summary", "ranking_summary", "event_days"]:
+                    getattr(timing_audit, table).write_parquet(
+                        directory / f"{table}.parquet"
+                    )
             for name, contents in context.documents.items():
                 path = destination / name
                 path.parent.mkdir(parents=True, exist_ok=True)

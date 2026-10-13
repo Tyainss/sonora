@@ -15,6 +15,7 @@ from mlflow import MlflowClient
 from sonora.breakout.evaluation import EvaluationPeriod, evaluate_scores
 from sonora.breakout.evaluation.holdout import load_or_create_holdout
 from sonora.breakout.modeling import MODEL_FEATURES, run_logistic_walk_forward
+from sonora.breakout.timing import TimingAudit
 from sonora.breakout.tracking import capture_comparison_context, record_comparison
 from sonora.data.paths import DataPaths
 
@@ -355,6 +356,15 @@ def test_three_way_comparison_records_interaction_metrics_review_and_reloadable_
         oos_start=periods[0].scoring_start,
         oos_end=periods[-1].scoring_end,
     )
+    timing = TimingAudit(
+        training_summary=pl.DataFrame({"period": ["2022 H1"], "positive_days": [1]}),
+        ranking_summary=pl.DataFrame(
+            {"approach": ["baseline"], "top3_day_rate": [0.5]}
+        ),
+        event_days=baseline.rankings.select(
+            "user_id", "artist_id", "scoring_date", "rank"
+        ),
+    )
     run_id = record_comparison(
         baseline=baseline,
         model=model,
@@ -363,12 +373,18 @@ def test_three_way_comparison_records_interaction_metrics_review_and_reloadable_
         project_root=root,
         interaction_model=interaction,
         interaction_fold_results=interaction_folds,
+        timing_audit=timing,
     )
     client = MlflowClient(
         tracking_uri=f"sqlite:///{(root / 'artifacts/mlflow/mlflow.db').as_posix()}"
     )
     run = client.get_run(run_id)
     assert run.info.status == "FINISHED"
+    for table in ["training_summary", "ranking_summary", "event_days"]:
+        saved = pl.read_parquet(
+            client.download_artifacts(run_id, f"diagnostics/timing/{table}.parquet")
+        )
+        assert saved.equals(getattr(timing, table))
     assert run.data.params["model.interaction"] == "False"
     assert run.data.params["interaction.interaction"] == "True"
     assert (
