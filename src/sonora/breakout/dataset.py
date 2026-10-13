@@ -8,12 +8,15 @@ from sonora.breakout.features import CANDIDATE_KEYS, build_breakout_features
 def build_modeling_data(
     events: pl.DataFrame | pl.LazyFrame,
     targets: pl.DataFrame | pl.LazyFrame,
+    *,
+    recency: bool = False,
 ) -> pl.DataFrame:
     """Append raw features while preserving every supplied target row and column.
 
     Pass the full listening history and caller-selected daily targets. Unknown
     labels and incomplete horizons remain intact; walk-forward splits select
     training rows. Features use only listening before each scoring date.
+    Optional prior-listening gaps remain null for artists with no older history.
     """
     target_frame = targets.collect() if isinstance(targets, pl.LazyFrame) else targets
     required = {*CANDIDATE_KEYS, "target_60d", "horizon_end_date", "has_full_horizon"}
@@ -21,7 +24,9 @@ def build_modeling_data(
     if missing:
         raise ValueError(f"Missing target columns: {sorted(missing)}")
 
-    features = build_breakout_features(events, target_frame.select(CANDIDATE_KEYS))
+    features = build_breakout_features(
+        events, target_frame.select(CANDIDATE_KEYS), recency=recency
+    )
     feature_columns = [
         column for column in features.columns if column not in CANDIDATE_KEYS
     ]
@@ -39,7 +44,9 @@ def build_modeling_data(
         maintain_order="left",
     )
     if result.height != target_frame.height or any(
-        result[column].null_count() for column in feature_columns
+        result[column].null_count()
+        for column in feature_columns
+        if column != "prior_listening_gap_days"
     ):
         raise ValueError("Every target row must receive model features")
     return result

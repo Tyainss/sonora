@@ -14,7 +14,11 @@ from mlflow import MlflowClient
 
 from sonora.breakout.evaluation import EvaluationPeriod, evaluate_scores
 from sonora.breakout.evaluation.holdout import load_or_create_holdout
-from sonora.breakout.modeling import MODEL_FEATURES, run_logistic_walk_forward
+from sonora.breakout.modeling import (
+    MODEL_FEATURES,
+    RECENCY_FEATURES,
+    run_logistic_walk_forward,
+)
 from sonora.breakout.timing import TimingAudit
 from sonora.breakout.tracking import capture_comparison_context, record_comparison
 from sonora.data.paths import DataPaths
@@ -333,7 +337,7 @@ def test_reserved_dates_cannot_be_recorded_as_development_results(comparison):
     assert not (root / "artifacts/mlflow").exists()
 
 
-def test_three_way_comparison_records_interaction_metrics_review_and_reloadable_models(
+def test_compared_models_record_metrics_reviews_and_reloadable_pipelines(
     comparison,
 ):
     root, paths, _, _, context, folds, (baseline, model) = comparison
@@ -356,6 +360,25 @@ def test_three_way_comparison_records_interaction_metrics_review_and_reloadable_
         oos_start=periods[0].scoring_start,
         oos_end=periods[-1].scoring_end,
     )
+    recency_data = pl.read_parquet(paths.daily_breakout_targets).with_columns(
+        pl.when(pl.col("previous_listening_count") == 0)
+        .then(None)
+        .otherwise(pl.col("previous_listening_count") + 8)
+        .alias("prior_listening_gap_days")
+    )
+    recency_folds = run_logistic_walk_forward(
+        recency_data,
+        periods,
+        baseline.rankings.select("user_id", "artist_id", "scoring_date", "score"),
+        recency=True,
+    )
+    recency = evaluate_scores(
+        pl.concat([r.scores for r in recency_folds]),
+        pl.concat([r.fold.scoring for r in recency_folds]),
+        pl.read_parquet(paths.breakout_events),
+        oos_start=periods[0].scoring_start,
+        oos_end=periods[-1].scoring_end,
+    )
     timing = TimingAudit(
         training_summary=pl.DataFrame({"period": ["2022 H1"], "positive_days": [1]}),
         ranking_summary=pl.DataFrame(
@@ -374,6 +397,8 @@ def test_three_way_comparison_records_interaction_metrics_review_and_reloadable_
         interaction_model=interaction,
         interaction_fold_results=interaction_folds,
         timing_audit=timing,
+        recency_model=recency,
+        recency_fold_results=recency_folds,
     )
     client = MlflowClient(
         tracking_uri=f"sqlite:///{(root / 'artifacts/mlflow/mlflow.db').as_posix()}"
@@ -411,6 +436,37 @@ def test_three_way_comparison_records_interaction_metrics_review_and_reloadable_
     np.testing.assert_array_equal(
         restored.decision_function(inputs), result.model.decision_function(inputs)
     )
+    assert run.data.params["recency.features"] == ",".join(RECENCY_FEATURES)
+    assert (
+        run.data.params["recency.terms"]
+        == "share,log1p_count,prior_gap_days,no_earlier_history"
+    )
+    assert "recency_vs_model.paired.same_day" in run.data.metrics
+    result = recency_folds[0]
+    local = client.download_artifacts(run_id, "recency/folds/2022_H1/model")
+    restored = mlflow.sklearn.load_model(local)
+    inputs = result.fold.scoring.select(
+        pl.col(RECENCY_FEATURES).cast(pl.Float64)
+    ).to_numpy()
+    assert np.isnan(inputs[:, 2]).any()
+    np.testing.assert_array_equal(
+        restored.decision_function(inputs), result.model.decision_function(inputs)
+    )
+    assert restored.named_steps["classifier"].n_features_in_ == 4
+
+
+def test_recency_evaluation_requires_its_fitted_models_before_recording(comparison):
+    root, _, _, _, context, folds, (baseline, model) = comparison
+    with pytest.raises(ValueError, match="supplied together"):
+        record_comparison(
+            baseline=baseline,
+            model=model,
+            fold_results=folds,
+            context=context,
+            project_root=root,
+            recency_model=model,
+        )
+    assert not (root / "artifacts/mlflow").exists()
 
 
 def test_interaction_evaluation_requires_its_fitted_models_before_recording(comparison):

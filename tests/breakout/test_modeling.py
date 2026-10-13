@@ -11,7 +11,9 @@ from sklearn.pipeline import Pipeline
 from sonora.breakout.evaluation import EvaluationPeriod, evaluate_scores, rank_scores
 from sonora.breakout.modeling import (
     MODEL_FEATURES,
+    RECENCY_FEATURES,
     fit_logistic_regression,
+    model_features,
     run_logistic_walk_forward,
     score_logistic_regression,
 )
@@ -51,9 +53,10 @@ def baseline():
     )
 
 
-class ShareScores:
-    def decision_function(self, inputs):
-        return inputs[:, 0]
+def share_scores():
+    model = fit_logistic_regression(training())
+    model.decision_function = lambda inputs: inputs[:, 0]
+    return model
 
 
 def test_preprocessing_logs_only_previous_count_and_fits_all_training_rows():
@@ -110,12 +113,12 @@ def test_interaction_uses_share_times_logged_count_before_training_only_scaling(
 
 def test_exact_ties_follow_baseline_but_even_small_model_differences_take_priority():
     rows = scoring()
-    result = score_logistic_regression(ShareScores(), rows, baseline().reverse())
+    result = score_logistic_regression(share_scores(), rows, baseline().reverse())
     assert result["artist_id"].to_list() == ["c", "b", "a", "a"]
     assert result["score"].to_list() == [-1.0, -2.0, -3.0, -1.0]
     assert result["baseline_score"].to_list() == [-3.0, -1.0, -2.0, -1.0]
     assert rank_scores(result, rows)["rank"].to_list() == [1, 2, 3, 1]
-    shuffled = score_logistic_regression(ShareScores(), rows.reverse(), baseline())
+    shuffled = score_logistic_regression(share_scores(), rows.reverse(), baseline())
     assert result.equals(shuffled)
 
 
@@ -217,12 +220,12 @@ def test_invalid_features_are_rejected_before_training(column, value):
 
 def test_missing_baseline_candidates_are_rejected():
     with pytest.raises(ValueError, match="Missing scores"):
-        score_logistic_regression(ShareScores(), scoring(), baseline().head(3))
+        score_logistic_regression(share_scores(), scoring(), baseline().head(3))
 
 
 def test_empty_scoring_preserves_the_evaluator_schema():
     result = score_logistic_regression(
-        ShareScores(), scoring().head(0), baseline().head(0)
+        share_scores(), scoring().head(0), baseline().head(0)
     )
     assert result.is_empty()
     assert result.schema["score"] == pl.Float64
@@ -236,3 +239,89 @@ def test_nonconverged_training_is_reported_as_a_failure(monkeypatch):
     monkeypatch.setattr(Pipeline, "fit", fail_to_converge)
     with pytest.raises(ConvergenceWarning):
         fit_logistic_regression(training())
+
+
+def recency_training():
+    return training().with_columns(
+        pl.Series(
+            "prior_listening_gap_days",
+            [None, 8.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0],
+        )
+    )
+
+
+def test_recency_median_and_scaling_use_training_only_and_keep_missing_artists():
+    rows = recency_training()
+    model = fit_logistic_regression(rows, recency=True)
+    transform = model.named_steps["transform"]
+    assert transform.named_transformers_["prior_gap"].statistics_[0] == 40
+    terms = np.column_stack(
+        [
+            rows["listening_share_7d"].to_numpy(),
+            np.log1p(rows["previous_listening_count"].to_numpy()),
+            [40, 8, 10, 20, 40, 80, 160, 320],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+        ]
+    )
+    assert_allclose(
+        transform.transform(rows.select(RECENCY_FEATURES).to_numpy()), terms
+    )
+    assert_allclose(model.named_steps["scale"].mean_, terms.mean(axis=0))
+    assert model_features(model) == RECENCY_FEATURES
+    assert (
+        model.named_steps["classifier"].get_params()
+        == fit_logistic_regression(rows).named_steps["classifier"].get_params()
+    )
+    means = model.named_steps["scale"].mean_.copy()
+    candidates = scoring().with_columns(
+        pl.Series("previous_listening_count", [0, 0, 2, 0]),
+        pl.Series("prior_listening_gap_days", [None, None, 10_000.0, None]),
+    )
+    result = score_logistic_regression(model, candidates, baseline())
+    assert result.height == candidates.height
+    assert np.isfinite(result["model_score"].to_numpy()).all()
+    assert transform.named_transformers_["prior_gap"].statistics_[0] == 40
+    assert_allclose(model.named_steps["scale"].mean_, means)
+
+
+def test_recency_indicator_is_present_when_missing_history_first_appears_at_scoring():
+    rows = recency_training().with_columns(
+        pl.col("previous_listening_count").clip(lower_bound=1),
+        pl.col("prior_listening_gap_days").fill_null(8),
+    )
+    model = fit_logistic_regression(rows, recency=True)
+    assert model.named_steps["classifier"].n_features_in_ == 4
+    candidates = scoring().with_columns(
+        pl.lit(0).alias("previous_listening_count"),
+        pl.lit(None, dtype=pl.Float64).alias("prior_listening_gap_days"),
+    )
+    terms = model.named_steps["transform"].transform(
+        candidates.select(RECENCY_FEATURES).to_numpy()
+    )
+    assert terms.shape == (4, 4)
+    assert terms[:, 3].tolist() == [1, 1, 1, 1]
+    assert score_logistic_regression(model, candidates, baseline()).height == 4
+
+
+@pytest.mark.parametrize("value", [None, 7, float("inf"), float("nan")])
+def test_invalid_prior_gap_or_missing_existing_history_is_rejected(value):
+    rows = recency_training().with_columns(
+        pl.Series(
+            "prior_listening_gap_days",
+            [None, value, 10, 20, 40, 80, 160, 320],
+            dtype=pl.Float64,
+        )
+    )
+    with pytest.raises(ValueError, match="Gaps must"):
+        fit_logistic_regression(rows, recency=True)
+
+
+def test_recency_requires_an_observed_training_gap_and_excludes_interaction():
+    rows = recency_training().with_columns(
+        pl.lit(0).alias("previous_listening_count"),
+        pl.lit(None, dtype=pl.Float64).alias("prior_listening_gap_days"),
+    )
+    with pytest.raises(ValueError, match="observed training gap"):
+        fit_logistic_regression(rows, recency=True)
+    with pytest.raises(ValueError, match="separate model comparisons"):
+        fit_logistic_regression(recency_training(), interaction=True, recency=True)

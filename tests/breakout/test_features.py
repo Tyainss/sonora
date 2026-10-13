@@ -144,3 +144,37 @@ def test_non_utc_events_are_rejected():
     )
     with pytest.raises(ValueError, match="UTC timestamps"):
         build_breakout_features(history, candidates([("u", "a", BASE)]))
+
+
+def test_prior_gap_excludes_boundary_recent_current_and_future_listens():
+    history = events(
+        [
+            ("u", "a", listened(-80)),
+            ("u", "a", listened(-8, 23)),
+            ("u", "a", listened(-7)),
+            ("u", "a", listened(-1)),
+            ("u", "a", listened(0)),
+            ("u", "a", listened(1)),
+        ]
+    )
+    scoring = candidates([("u", "a", BASE), ("u", "a", BASE + dt.timedelta(days=1))])
+    result = build_breakout_features(history, scoring, recency=True).sort(KEYS)
+    assert result["prior_listening_gap_days"].to_list() == [8, 8]
+    assert result["previous_listening_count"].to_list() == [2, 3]
+    assert_frame_equal(
+        result.drop("prior_listening_gap_days"),
+        build_breakout_features(history, scoring).sort(KEYS),
+    )
+
+
+def test_prior_gap_is_null_without_older_history_and_is_isolated_by_user():
+    result = build_breakout_features(
+        events([("u", "a", listened(-7)), ("v", "a", listened(-80))]),
+        candidates([("u", "a", BASE), ("v", "a", BASE)]),
+        recency=True,
+    ).sort(KEYS)
+    assert result["prior_listening_gap_days"].to_list() == [None, 80]
+    assert result["previous_listening_count"].to_list() == [0, 1]
+    empty = build_breakout_features(events([]), candidates([]), recency=True)
+    assert empty.is_empty()
+    assert empty.schema["prior_listening_gap_days"] == pl.Int64

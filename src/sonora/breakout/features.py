@@ -9,15 +9,20 @@ RECENT_SHARE_DAYS = 7
 def build_breakout_features(
     events: pl.DataFrame | pl.LazyFrame,
     candidates: pl.DataFrame,
+    *,
+    recency: bool = False,
 ) -> pl.DataFrame:
-    """Return the two raw model features for each supplied eligible artist-day.
+    """Return raw listening features for each supplied eligible artist-day.
 
     listening_share_7d uses D-7 through D-1. previous_listening_count counts
-    artist listens strictly before D-7. Eligibility belongs to the caller;
+    artist listens strictly before D-7. Optional prior_listening_gap_days is
+    D minus the latest artist listening date strictly before D-7; it is null
+    when there are no earlier listens. Eligibility belongs to the caller;
     target labels and feature transformations are not part of this output.
     """
-    return (
-        build_listening_evidence(events, candidates)
+    event_frame = events.collect() if isinstance(events, pl.LazyFrame) else events
+    features = (
+        build_listening_evidence(event_frame, candidates)
         .with_columns(
             (pl.col("prior_scrobbles") - pl.col("artist_scrobbles_7d")).alias(
                 "previous_listening_count"
@@ -25,6 +30,40 @@ def build_breakout_features(
         )
         .select(*CANDIDATE_KEYS, "listening_share_7d", "previous_listening_count")
     )
+    if not recency:
+        return features
+    history = (
+        event_frame.select(
+            "user_id", "artist_id", pl.col("listened_at").dt.date().alias("older_date")
+        )
+        .unique()
+        .sort("older_date")
+    )
+    gaps = (
+        candidates.select(CANDIDATE_KEYS)
+        .with_columns(
+            (pl.col("scoring_date") - pl.duration(days=RECENT_SHARE_DAYS)).alias(
+                "cutoff"
+            )
+        )
+        .sort("cutoff")
+        .join_asof(
+            history,
+            left_on="cutoff",
+            right_on="older_date",
+            by=["user_id", "artist_id"],
+            strategy="backward",
+            allow_exact_matches=False,
+            check_sortedness=False,
+        )
+        .select(
+            *CANDIDATE_KEYS,
+            (pl.col("scoring_date") - pl.col("older_date"))
+            .dt.total_days()
+            .alias("prior_listening_gap_days"),
+        )
+    )
+    return features.join(gaps, on=CANDIDATE_KEYS, validate="1:1", maintain_order="left")
 
 
 def build_listening_evidence(

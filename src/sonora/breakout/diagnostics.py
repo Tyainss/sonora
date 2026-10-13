@@ -9,7 +9,12 @@ from sonora.breakout.evaluation.comparison import compare_event_detections
 from sonora.breakout.evaluation.evaluate import EvaluationResult
 from sonora.breakout.evaluation.events import EVENT_KEYS, TOP_K
 from sonora.breakout.features import CANDIDATE_KEYS
-from sonora.breakout.modeling import MODEL_FEATURES, LogisticFoldResult
+from sonora.breakout.modeling import (
+    MODEL_FEATURES,
+    RECENCY_FEATURES,
+    LogisticFoldResult,
+    model_features,
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,7 @@ def review_detection_changes(
             *EVENT_KEYS,
             pl.col("listening_share_7d").alias(f"{checkpoint}_share"),
             pl.col("previous_listening_count").alias(f"{checkpoint}_previous_count"),
+            pl.col("prior_listening_gap_days").alias(f"{checkpoint}_prior_gap_days"),
         )
         reviewed = reviewed.join(features, on=EVENT_KEYS, how="left", validate="1:1")
     return reviewed.with_columns(
@@ -179,6 +185,14 @@ def diagnose_lost_detections(
                 pl.col("promoted_interaction_contribution")
                 - pl.col("interaction_contribution")
             ).alias("interaction_advantage"),
+            (
+                pl.col("promoted_prior_gap_contribution")
+                - pl.col("prior_gap_contribution")
+            ).alias("prior_gap_advantage"),
+            (
+                pl.col("promoted_no_history_contribution")
+                - pl.col("no_history_contribution")
+            ).alias("no_history_advantage"),
         )
     )
     summary = (
@@ -216,10 +230,13 @@ def _explain_scores(
     columns = {
         **keys.schema,
         **{feature: pl.Float64 for feature in MODEL_FEATURES},
+        "prior_listening_gap_days": pl.Float64,
         "period": pl.String,
         "share_contribution": pl.Float64,
         "previous_count_contribution": pl.Float64,
         "interaction_contribution": pl.Float64,
+        "prior_gap_contribution": pl.Float64,
+        "no_history_contribution": pl.Float64,
         "intercept": pl.Float64,
         "model_score": pl.Float64,
     }
@@ -228,8 +245,16 @@ def _explain_scores(
         rows = result.fold.scoring.join(keys, on=CANDIDATE_KEYS, how="semi")
         if rows.is_empty():
             continue
-        rows = rows.select(*CANDIDATE_KEYS, pl.col(MODEL_FEATURES).cast(pl.Float64))
-        inputs = rows.select(MODEL_FEATURES).to_numpy()
+        features = model_features(result.model)
+        has_recency = features == RECENCY_FEATURES
+        rows = rows.select(
+            *CANDIDATE_KEYS,
+            pl.col(MODEL_FEATURES).cast(pl.Float64),
+            pl.col("prior_listening_gap_days").cast(pl.Float64)
+            if "prior_listening_gap_days" in rows.columns
+            else pl.lit(None, dtype=pl.Float64).alias("prior_listening_gap_days"),
+        )
+        inputs = rows.select(features).to_numpy()
         classifier = result.model.named_steps["classifier"]
         contributions = result.model[:-1].transform(inputs) * classifier.coef_[0]
         explained = rows.with_columns(
@@ -241,6 +266,14 @@ def _explain_scores(
                 contributions[:, 2]
                 if "interaction" in result.model.named_steps
                 else np.zeros(rows.height),
+            ),
+            pl.Series(
+                "prior_gap_contribution",
+                contributions[:, 2] if has_recency else np.zeros(rows.height),
+            ),
+            pl.Series(
+                "no_history_contribution",
+                contributions[:, 3] if has_recency else np.zeros(rows.height),
             ),
             pl.lit(float(classifier.intercept_[0])).alias("intercept"),
         ).join(
@@ -254,6 +287,8 @@ def _explain_scores(
                 pl.col("share_contribution")
                 + pl.col("previous_count_contribution")
                 + pl.col("interaction_contribution")
+                + pl.col("prior_gap_contribution")
+                + pl.col("no_history_contribution")
                 + pl.col("intercept")
             )
             .to_series()

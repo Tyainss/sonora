@@ -24,14 +24,18 @@ from sonora.breakout.evaluation.comparison import compare_event_detections
 from sonora.breakout.evaluation.evaluate import EvaluationResult
 from sonora.breakout.evaluation.events import TOP_K
 from sonora.breakout.features import CANDIDATE_KEYS, RECENT_SHARE_DAYS
-from sonora.breakout.modeling import MODEL_FEATURES, LogisticFoldResult
+from sonora.breakout.modeling import (
+    RECENCY_FEATURES,
+    LogisticFoldResult,
+    model_features,
+)
 from sonora.breakout.targets import DEFAULT_HORIZON_DAYS
 from sonora.breakout.timing import TimingAudit
 from sonora.data.paths import DataPaths
 
 EXPERIMENT_NAME = "breakout-development-comparison"
 TRACKING_DIRECTORY = Path("artifacts/mlflow")
-MODEL_PACKAGES = ("mlflow", "scikit-learn", "numpy", "scipy", "cloudpickle")
+MODEL_PACKAGES = ("mlflow", "scikit-learn", "numpy", "scipy", "cloudpickle", "skops")
 
 
 @dataclass(frozen=True)
@@ -131,8 +135,10 @@ def record_comparison(
     interaction_model: EvaluationResult | None = None,
     interaction_fold_results: list[LogisticFoldResult] | None = None,
     timing_audit: TimingAudit | None = None,
+    recency_model: EvaluationResult | None = None,
+    recency_fold_results: list[LogisticFoldResult] | None = None,
 ) -> str:
-    """Record the baseline, additive model, and optional interaction in one run.
+    """Record the baseline and compared logistic models in one development run.
 
     Optional timing views are saved alongside the comparison diagnostics.
     Recording disables MLflow usage telemetry and preserves the active run/URI.
@@ -142,9 +148,15 @@ def record_comparison(
         raise ValueError(
             "Interaction evaluation and fitted folds must be supplied together"
         )
+    if (recency_model is None) != (recency_fold_results is None):
+        raise ValueError(
+            "Recency evaluation and fitted folds must be supplied together"
+        )
     approaches = [("model", model, fold_results)]
     if interaction_model is not None:
         approaches.append(("interaction", interaction_model, interaction_fold_results))
+    if recency_model is not None:
+        approaches.append(("recency", recency_model, recency_fold_results))
     baseline_keys = baseline.rankings.select(CANDIDATE_KEYS).sort(CANDIDATE_KEYS)
     development_end = dt.date.fromisoformat(
         context.holdout["boundaries"]["development_end"]
@@ -182,6 +194,15 @@ def record_comparison(
                 ),
             )
         )
+    if recency_model is not None:
+        paired_results.append(
+            (
+                "recency_vs_model",
+                compare_event_detections(
+                    model.event_results, recency_model.event_results
+                ),
+            )
+        )
     MLFLOW_DISABLE_TELEMETRY.set(True)
     storage = (project_root / TRACKING_DIRECTORY).resolve()
     storage.mkdir(parents=True, exist_ok=True)
@@ -200,7 +221,8 @@ def record_comparison(
         experiment_id,
         tags={
             "mlflow.runName": "listening-share-vs-logistic-regression"
-            + ("-and-interaction" if interaction_model is not None else ""),
+            + ("-and-interaction" if interaction_model is not None else "")
+            + ("-and-recency" if recency_model is not None else ""),
             "mlflow.source.git.commit": context.git_commit,
             "git.dirty": str(context.git_dirty).lower(),
             "evaluation.scope": "development",
@@ -215,6 +237,7 @@ def record_comparison(
             "ranking": "decision_function; exact ties use baseline ordering",
             "horizon_days": DEFAULT_HORIZON_DAYS,
             "top_k": TOP_K,
+            "model_serialization": "skops",
             "required_appearances": "min(2, valid_opportunities)",
             "training": "expanding; horizon_end_date < scoring_start",
             "fold_count": len(fold_results),
@@ -227,15 +250,18 @@ def record_comparison(
         }
         for name, _, results in approaches:
             has_interaction = "interaction" in results[0].model.named_steps
+            features = model_features(results[0].model)
+            has_recency = features == RECENCY_FEATURES
             params.update(
                 {
                     name: "logistic_regression",
-                    f"{name}.features": ",".join(MODEL_FEATURES),
+                    f"{name}.features": ",".join(features),
                     f"{name}.previous_count_transform": "log1p",
                     f"{name}.scaling": "StandardScaler fitted per training fold",
                     f"{name}.interaction": has_interaction,
                     f"{name}.terms": "share,log1p_count"
-                    + (",share_x_log1p_count" if has_interaction else ""),
+                    + (",share_x_log1p_count" if has_interaction else "")
+                    + (",prior_gap_days,no_earlier_history" if has_recency else ""),
                     **{
                         f"{name}.{key}": value
                         for key, value in results[0]
@@ -245,8 +271,16 @@ def record_comparison(
                     },
                 }
             )
+            if has_recency:
+                params[f"{name}.gap_imputation"] = (
+                    "training median; always-present missing-history indicator"
+                )
+                params[f"{name}.gap_units"] = (
+                    "days since latest listen strictly before D-7"
+                )
             if any(
                 ("interaction" in result.model.named_steps) != has_interaction
+                or model_features(result.model) != features
                 for result in results
             ):
                 raise ValueError(
@@ -331,8 +365,9 @@ def record_comparison(
                 folds = []
                 for result in results:
                     fold = result.fold
+                    features = model_features(result.model)
                     inputs = (
-                        fold.scoring.select(pl.col(MODEL_FEATURES).cast(pl.Float64))
+                        fold.scoring.select(pl.col(features).cast(pl.Float64))
                         .head(5)
                         .to_numpy()
                     )
@@ -342,11 +377,15 @@ def record_comparison(
                     mlflow.sklearn.save_model(
                         result.model,
                         folder / "model",
+                        serialization_format=mlflow.sklearn.SERIALIZATION_FORMAT_SKOPS,
+                        skops_trusted_types=["numpy.dtype"]
+                        if features == RECENCY_FEATURES
+                        else None,
                         signature=infer_signature(inputs, result.model.predict(inputs)),
                         input_example=inputs,
                         pip_requirements=context.model_requirements,
                         metadata={
-                            "feature_order": list(MODEL_FEATURES),
+                            "feature_order": list(features),
                             "ranking_method": "decision_function",
                             "interaction": "interaction" in result.model.named_steps,
                         },
@@ -366,6 +405,17 @@ def record_comparison(
                             )
                             .select("user_id", "artist_id")
                             .n_unique(),
+                            **(
+                                {
+                                    "gap_training_median": float(
+                                        result.model.named_steps["transform"]
+                                        .named_transformers_["prior_gap"]
+                                        .statistics_[0]
+                                    )
+                                }
+                                if features == RECENCY_FEATURES
+                                else {}
+                            ),
                         }
                     )
                 pl.DataFrame(folds).write_parquet(base / "folds.parquet")

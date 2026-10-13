@@ -7,6 +7,7 @@ import numpy as np
 import polars as pl
 from sklearn.compose import ColumnTransformer
 from sklearn.exceptions import ConvergenceWarning
+from sklearn.impute import MissingIndicator, SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
@@ -18,9 +19,10 @@ from sklearn.preprocessing import (
 from sonora.breakout.evaluation.periods import EvaluationPeriod
 from sonora.breakout.evaluation.rankings import rank_scores
 from sonora.breakout.evaluation.splits import WalkForwardFold, build_walk_forward_folds
-from sonora.breakout.features import CANDIDATE_KEYS
+from sonora.breakout.features import CANDIDATE_KEYS, RECENT_SHARE_DAYS
 
 MODEL_FEATURES = ("listening_share_7d", "previous_listening_count")
+RECENCY_FEATURES = (*MODEL_FEATURES, "prior_listening_gap_days")
 
 
 @dataclass(frozen=True)
@@ -33,10 +35,16 @@ class LogisticFoldResult:
 
 
 def fit_logistic_regression(
-    training: pl.DataFrame, *, interaction: bool = False
+    training: pl.DataFrame, *, interaction: bool = False, recency: bool = False
 ) -> Pipeline:
-    """Fit L2 regression, optionally adding share × log-count before scaling."""
-    inputs = _model_inputs(training)
+    """Fit additive, interaction, or recency regression with training-only scaling.
+
+    Recency uses the gap in days, a training-median fill, and an always-present
+    missing-history indicator. At least one observed training gap is required.
+    """
+    if interaction and recency:
+        raise ValueError("Interaction and recency are separate model comparisons")
+    inputs = _model_inputs(training, recency=recency)
     required = {"target_60d", "has_full_horizon"}
     if required - set(training.columns):
         raise ValueError("Training requires target_60d and has_full_horizon")
@@ -52,6 +60,8 @@ def fit_logistic_regression(
         raise ValueError("Training requires Boolean labels and fully observed horizons")
     if training["target_60d"].n_unique() != 2:
         raise ValueError("Logistic regression requires both target classes")
+    if recency and training["prior_listening_gap_days"].null_count() == training.height:
+        raise ValueError("Recency requires at least one observed training gap")
 
     model = Pipeline(
         [
@@ -77,6 +87,13 @@ def fit_logistic_regression(
             ),
         ]
     )
+    if recency:
+        model.named_steps["transform"].transformers.extend(
+            [
+                ("prior_gap", SimpleImputer(strategy="median"), [2]),
+                ("no_earlier_history", MissingIndicator(features="all"), [2]),
+            ]
+        )
     if interaction:
         model.steps.insert(
             1,
@@ -102,7 +119,9 @@ def score_logistic_regression(
     rank for the existing evaluator; neither column is a breakout probability.
     baseline_scores must cover exactly the supplied candidates.
     """
-    inputs = _model_inputs(candidates)
+    inputs = _model_inputs(
+        candidates, recency=model_features(model) == RECENCY_FEATURES
+    )
     baseline = rank_scores(baseline_scores, candidates).select(
         *CANDIDATE_KEYS, pl.col("score").alias("baseline_score")
     )
@@ -140,6 +159,7 @@ def run_logistic_walk_forward(
     baseline_scores: pl.DataFrame,
     *,
     interaction: bool = False,
+    recency: bool = False,
 ) -> list[LogisticFoldResult]:
     """Fit a fresh pipeline for each non-empty scoring fold using existing splits.
 
@@ -155,7 +175,9 @@ def run_logistic_walk_forward(
     rank_scores(baseline_scores, expected)
     results = []
     for fold in folds:
-        model = fit_logistic_regression(fold.training, interaction=interaction)
+        model = fit_logistic_regression(
+            fold.training, interaction=interaction, recency=recency
+        )
         baseline = baseline_scores.join(
             fold.scoring.select(CANDIDATE_KEYS), on=CANDIDATE_KEYS, how="semi"
         )
@@ -169,8 +191,18 @@ def run_logistic_walk_forward(
     return results
 
 
-def _model_inputs(rows: pl.DataFrame) -> np.ndarray:
-    missing = set(MODEL_FEATURES) - set(rows.columns)
+def model_features(model: Pipeline) -> tuple[str, ...]:
+    """Return the fitted pipeline's raw input columns in training order."""
+    return (
+        RECENCY_FEATURES
+        if "prior_gap" in model.named_steps["transform"].named_transformers_
+        else MODEL_FEATURES
+    )
+
+
+def _model_inputs(rows: pl.DataFrame, *, recency: bool = False) -> np.ndarray:
+    features = RECENCY_FEATURES if recency else MODEL_FEATURES
+    missing = set(features) - set(rows.columns)
     if missing:
         raise ValueError(f"Missing model features: {sorted(missing)}")
     if any(
@@ -188,4 +220,22 @@ def _model_inputs(rows: pl.DataFrame) -> np.ndarray:
         raise ValueError(
             "Listening share must be in [0, 1] and previous count non-negative"
         )
+    if recency:
+        gap = "prior_listening_gap_days"
+        if rows.schema[gap] != pl.Null and not rows.schema[gap].is_numeric():
+            raise ValueError("Prior-listening gaps must be numeric or null")
+        if rows.filter(
+            (pl.col(gap).is_null() != (pl.col("previous_listening_count") == 0))
+            | (
+                pl.col(gap).is_not_null()
+                & (
+                    ~pl.col(gap).cast(pl.Float64).is_finite()
+                    | (pl.col(gap) < RECENT_SHARE_DAYS + 1)
+                )
+            )
+        ).height:
+            raise ValueError(
+                "Gaps must be finite and at least 8 days; only zero earlier counts have missing gaps"
+            )
+        return rows.select(pl.col(features).cast(pl.Float64)).to_numpy()
     return inputs

@@ -11,6 +11,22 @@ KEYS = ["user_id", "artist_id", "scoring_date"]
 FEATURES = ["listening_share_7d", "previous_listening_count"]
 
 
+def test_recency_data_keeps_nullable_gaps_and_original_targets():
+    source = targets()
+    result = build_modeling_data(history(), source, recency=True)
+    assert_frame_equal(result.select(source.columns), source)
+    assert result["prior_listening_gap_days"].to_list() == [9, 32, 40]
+    recent_only = history().filter(
+        pl.col("listened_at").dt.date() == dt.date(2022, 1, 1)
+    )
+    source = source.filter(
+        (pl.col("user_id") == "u") & (pl.col("scoring_date") == dt.date(2022, 1, 2))
+    )
+    result = build_modeling_data(recent_only, source, recency=True)
+    assert result.height == source.height
+    assert result["prior_listening_gap_days"].to_list() == [None]
+
+
 def targets():
     return pl.DataFrame(
         {

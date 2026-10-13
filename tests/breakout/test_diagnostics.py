@@ -175,6 +175,55 @@ def test_changed_model_cannot_explain_a_different_recorded_score(comparison):
         diagnose_lost_detections(baseline, model, folds)
 
 
+def test_recency_contributions_reconstruct_scores_with_missing_history(comparison):
+    baseline, _, original = comparison
+    data = (
+        pl.concat([original[-1].fold.training, *[r.fold.scoring for r in original]])
+        .unique(KEYS)
+        .with_columns(
+            pl.when(pl.col("previous_listening_count") == 0)
+            .then(None)
+            .when(pl.col("previous_listening_count") >= 100)
+            .then(8)
+            .otherwise(80)
+            .alias("prior_listening_gap_days")
+        )
+    )
+    periods = [
+        EvaluationPeriod(
+            r.fold.period, r.fold.scoring_start, r.fold.scoring_end, r.fold.is_partial
+        )
+        for r in original
+    ]
+    folds = run_logistic_walk_forward(
+        data, periods, baseline.rankings.select(*KEYS, "score"), recency=True
+    )
+    model = evaluate_scores(
+        pl.concat([r.scores for r in folds]),
+        pl.concat([r.fold.scoring for r in folds]),
+        baseline.event_results,
+        oos_start=periods[0].scoring_start,
+        oos_end=periods[-1].scoring_end,
+    )
+    diagnostics = diagnose_lost_detections(baseline, model, folds)
+    assert diagnostics.displacements.height > 0
+    assert (
+        diagnostics.daily_ranks["prior_listening_gap_days"].null_count()
+        == diagnostics.daily_ranks.height
+    )
+    assert (
+        diagnostics.displacements["interaction_advantage"].to_list()
+        == [0] * diagnostics.displacements.height
+    )
+    np.testing.assert_allclose(
+        diagnostics.displacements["share_advantage"]
+        + diagnostics.displacements["previous_count_advantage"]
+        + diagnostics.displacements["prior_gap_advantage"]
+        + diagnostics.displacements["no_history_advantage"],
+        diagnostics.displacements["model_advantage"],
+    )
+
+
 def test_mismatched_daily_candidates_are_rejected(comparison):
     baseline, model, folds = comparison
     model = replace(model, rankings=model.rankings.slice(1))
