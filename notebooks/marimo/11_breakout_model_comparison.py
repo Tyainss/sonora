@@ -14,7 +14,10 @@ def _():
     import polars as pl
 
     from sonora.breakout import build_modeling_data, score_recent_listening_share
-    from sonora.breakout.diagnostics import diagnose_lost_detections
+    from sonora.breakout.diagnostics import (
+        diagnose_lost_detections,
+        review_detection_changes,
+    )
     from sonora.breakout.evaluation import (
         EvaluationPeriod,
         build_evaluation_periods,
@@ -47,6 +50,7 @@ def _():
         paths,
         pl,
         record_comparison,
+        review_detection_changes,
         run_logistic_walk_forward,
         score_recent_listening_share,
     )
@@ -57,7 +61,7 @@ def _(mo):
     mo.md(r"""
     # Can listening history help detect breakouts earlier?
 
-    I compare **7-day listening share** with **Logistic Regression**, which combines that share with the number of earlier listens. Earlier listens exclude the most recent seven days and are log-transformed.
+    I compare **7-day listening share**, **additive Logistic Regression**, and **Logistic Regression with an interaction**. Both models use recent share and log-transformed earlier listens, which exclude the most recent seven days. The interaction adds their product before scaling, allowing the influence of earlier listening to vary with recent share.
 
     Both rank the same artists on the same dates. Detection requires two Top-3 appearances within the 60 days before confirmation, reduced to one when only one eligible day exists.
     """)
@@ -165,6 +169,7 @@ def _(
     periods,
     pl,
     run_logistic_walk_forward,
+    review_detection_changes,
     score_recent_listening_share,
     user_listening,
 ):
@@ -173,6 +178,7 @@ def _(
     expected_candidates = pl.concat([fold.scoring for fold in _folds])
     baseline_scores = score_recent_listening_share(user_listening, expected_candidates)
     fold_results = run_logistic_walk_forward(_data, periods, baseline_scores)
+    interaction_fold_results = run_logistic_walk_forward(_data, periods, baseline_scores, interaction=True)
     _model_scores = combine_score_streams([result.scores for result in fold_results])
     baseline_evaluation = evaluate_scores(
         baseline_scores,
@@ -191,7 +197,15 @@ def _(
     paired_events = compare_event_detections(
         baseline_evaluation.event_results, model_evaluation.event_results
     )
-    return baseline_evaluation, fold_results, model_evaluation, paired_events
+    interaction_evaluation = evaluate_scores(
+        combine_score_streams([result.scores for result in interaction_fold_results]),
+        expected_candidates, development_events,
+        oos_start=evaluation_start, oos_end=periods[-1].scoring_end,
+    )
+    interaction_vs_baseline = compare_event_detections(baseline_evaluation.event_results, interaction_evaluation.event_results)
+    interaction_vs_model = compare_event_detections(model_evaluation.event_results, interaction_evaluation.event_results)
+    event_review = review_detection_changes(baseline_evaluation, model_evaluation, fold_results)
+    return baseline_evaluation, event_review, fold_results, interaction_evaluation, interaction_fold_results, interaction_vs_baseline, interaction_vs_model, model_evaluation, paired_events
 
 
 @app.cell(hide_code=True)
@@ -205,7 +219,7 @@ def _(mo):
 
 
 @app.cell
-def _(baseline_evaluation, mo, model_evaluation, pl):
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl):
     def _row(name, evaluation):
         _summary = evaluation.event_summary.row(0, named=True)
         _events = evaluation.event_results.filter(pl.col("is_comparable") & pl.col("is_scoreable"))
@@ -220,7 +234,7 @@ def _(baseline_evaluation, mo, model_evaluation, pl):
             "Median days before start": _summary["days_to_breakout_start_median"],
         }
     mo.ui.table(
-        pl.DataFrame([_row("7-day listening share", baseline_evaluation), _row("Logistic Regression", model_evaluation)]),
+        pl.DataFrame([_row("7-day listening share", baseline_evaluation), _row("Additive LR", model_evaluation), _row("Interaction LR", interaction_evaluation)]),
         selection=None,
     )
     return
@@ -231,7 +245,7 @@ def _(baseline_evaluation, mo, model_evaluation):
     _baseline = baseline_evaluation.event_summary.row(0, named=True)
     _model = model_evaluation.event_summary.row(0, named=True)
     mo.md(f"""
-    The baseline detects **{_baseline['detected_events']}** breakouts and the model detects **{_model['detected_events']}**, from the same **{_baseline['scoreable_events']}** scoreable events. **{_baseline['anticipatable_events']}** had an eligible day before breakout listening started.
+    All three approaches evaluate the same **{_baseline['scoreable_events']}** scoreable events. **{_baseline['anticipatable_events']}** had an eligible day before breakout listening started.
 
     The median timing uses detected events only. Positive days mean detection before breakout starts; negative days mean detection after it starts. The paired comparison below shows timing changes for the same events.
     """)
@@ -247,15 +261,13 @@ def _(mo):
 
 
 @app.cell
-def _(mo, paired_events, pl):
-    _counts = dict(paired_events.group_by("change").len().iter_rows())
+def _(interaction_vs_baseline, interaction_vs_model, mo, paired_events, pl):
+    _rows = []
+    for _name, _paired in [("Additive vs baseline", paired_events), ("Interaction vs baseline", interaction_vs_baseline), ("Interaction vs additive", interaction_vs_model)]:
+        _counts = dict(_paired.group_by("change").len().iter_rows())
+        _rows.append({"Comparison": _name, **{change: _counts.get(change, 0) for change in ["Earlier", "Later", "Same day", "Newly detected", "Lost detection", "Missed by both"]}, "Median days earlier (both detected)": _paired["days_earlier"].median()})
     mo.ui.table(
-        pl.DataFrame(
-            {
-                "Change": ["Earlier", "Later", "Same day", "Newly detected", "Lost detection", "Missed by both"],
-                "Events": [_counts.get(change, 0) for change in ["Earlier", "Later", "Same day", "Newly detected", "Lost detection", "Missed by both"]],
-            }
-        ),
+        pl.DataFrame(_rows),
         selection=None,
     )
     return
@@ -267,7 +279,7 @@ def _(mo, paired_events):
     _median = _days.median()
     _timing = "unavailable" if _median is None else f"{_median:g} days"
     mo.md(f"""
-    For events both approaches detect, the median change is **{_timing}**. Positive values mean the model detects earlier; negative values mean it detects later.
+    For events both the additive model and baseline detect, the median change is **{_timing}**. Positive values mean the candidate detects earlier than its reference; negative values mean it detects later.
     """)
     return
 
@@ -287,14 +299,66 @@ def _(artist_names, mo, paired_events, pl):
         pl.col("model_detection_date").alias("Model date"),
         pl.col("days_earlier").alias("Days earlier"),
     )
-    mo.accordion({"New/lost detections and the five largest changes in each direction": mo.ui.table(_details, selection=None)})
+    mo.accordion({"Additive model: new/lost detections and the five largest timing changes": mo.ui.table(_details, selection=None, page_size=max(1, _details.height))})
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Why did the model miss breakouts the baseline caught?
+    ## Does earlier listening distinguish gains from delays?
+
+    Entry is the artist's first eligible day in the event's evaluation window. Earlier listens exclude the seven days before entry. The groups describe history at that date, not whether an artist is globally new or familiar.
+    """)
+    return
+
+
+@app.cell
+def _(event_review, mo, pl):
+    _rows = []
+    for _group in ["No earlier listens", "Earlier listens"]:
+        _events = event_review.filter(pl.col("history_at_entry") == _group)
+        _counts = dict(_events.group_by("change").len().iter_rows())
+        _rows.append({"History at entry": _group, "Events": _events.height, **{change: _counts.get(change, 0) for change in ["Earlier", "Later", "Same day", "Newly detected", "Lost detection", "Missed by both"]}})
+    mo.ui.table(pl.DataFrame(_rows), selection=None)
+    return
+
+
+@app.cell
+def _(artist_names, event_review, mo, pl):
+    _views = {}
+    for _change in ["Earlier", "Later"]:
+        _cases = event_review.filter(pl.col("change") == _change).sort("days_earlier", descending=_change == "Earlier").join(artist_names, on="artist_id", how="left", validate="m:1").select(
+            pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+            pl.col("days_earlier").alias("Days earlier"),
+            pl.col("history_at_entry").alias("History at entry"),
+            pl.col("entry_previous_count").cast(pl.Int64).alias("Earlier listens at entry"),
+            pl.col("reference_detection_date").alias("Baseline detection"),
+            pl.col("model_detection_date").alias("Additive detection"),
+            (100 * pl.col("baseline_detection_share")).round(2).alias("Share at baseline detection (%)"),
+            (100 * pl.col("model_detection_share")).round(2).alias("Share at additive detection (%)"),
+        )
+        _views[_change] = mo.ui.table(_cases, selection=None, page_size=max(1, _cases.height))
+    mo.accordion(_views)
+    return
+
+
+@app.cell(hide_code=True)
+def _(event_review, mo, pl):
+    _earlier = event_review.filter(pl.col("change") == "Earlier")
+    _later = event_review.filter(pl.col("change") == "Later")
+    _earlier_history = _earlier.filter(pl.col("entry_previous_count") > 0).height
+    _later_zero = _later.filter(pl.col("entry_previous_count") == 0).height
+    mo.md(f"""
+    **{_earlier_history}/{_earlier.height}** earlier detections had earlier listens at entry. **{_later_zero}/{_later.height}** delayed detections had none. The full event counts above put these changes alongside unchanged detections and misses.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Why did the additive model miss breakouts the baseline caught?
 
     Each event needs enough eligible Top-3 days before confirmation. The summary counts the full evaluation window; the details show days when either approach ranked the artist in its Top 3.
     """)
@@ -394,7 +458,19 @@ def _(mo):
 
 
 @app.cell
-def _(baseline_evaluation, mo, model_evaluation, periods, pl):
+def _(artist_names, interaction_vs_model, mo, pl):
+    _changed = interaction_vs_model.filter(pl.col("change").is_in(["Newly detected", "Lost detection"])).join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("change").alias("Interaction vs additive"),
+        pl.col("reference_detection_date").alias("Additive detection"),
+        pl.col("model_detection_date").alias("Interaction detection"),
+    )
+    mo.accordion({"Which additive detections did the interaction recover or lose?": mo.ui.table(_changed, selection=None, page_size=max(1, _changed.height))})
+    return
+
+
+@app.cell
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, periods, pl):
     _baseline = baseline_evaluation.period_summary.select(
         pl.col("confirmation_period").alias("Period"),
         pl.col("scoreable_events").alias("Events"),
@@ -407,7 +483,12 @@ def _(baseline_evaluation, mo, model_evaluation, periods, pl):
         pl.col("anticipatory_detections").alias("Model anticipatory"),
     )
     _status = pl.DataFrame({"Period": [period.period for period in periods], "Partial period": [period.is_partial for period in periods]})
-    mo.ui.table(_baseline.join(_model, on="Period", validate="1:1").join(_status, on="Period", validate="1:1"), selection=None)
+    _interaction = interaction_evaluation.period_summary.select(
+        pl.col("confirmation_period").alias("Period"),
+        (100 * pl.col("event_coverage_at_3")).round(1).alias("Interaction coverage (%)"),
+        pl.col("anticipatory_detections").alias("Interaction anticipatory"),
+    )
+    mo.ui.table(_baseline.join(_model, on="Period", validate="1:1").join(_interaction, on="Period", validate="1:1").join(_status, on="Period", validate="1:1"), selection=None)
     return
 
 
@@ -422,9 +503,9 @@ def _(mo):
 
 
 @app.cell
-def _(baseline_evaluation, mo, model_evaluation, pl):
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl):
     _rows = []
-    for _name, _evaluation in [("7-day listening share", baseline_evaluation), ("Logistic Regression", model_evaluation)]:
+    for _name, _evaluation in [("7-day listening share", baseline_evaluation), ("Additive LR", model_evaluation), ("Interaction LR", interaction_evaluation)]:
         _summary = _evaluation.daily_summary.row(0, named=True)
         _rows.append({
             "Approach": _name,
@@ -441,40 +522,44 @@ def _(mo):
     mo.md("""
     ## What did the model learn?
 
-    A positive weight favours higher values when the other feature stays the same. These weights apply after log-transforming earlier listens and scaling both features.
+    Each weight applies to a standardized term. The interaction model also uses recent share × log-transformed earlier listens. A negative interaction weight reduces the influence of earlier listening as recent share increases.
     """)
     return
 
 
 @app.cell
-def _(fold_results, mo, pl):
+def _(fold_results, interaction_fold_results, mo, pl):
     _rows = []
-    for _result in fold_results:
+    for _name, _result in [("Additive LR", result) for result in fold_results] + [("Interaction LR", result) for result in interaction_fold_results]:
         _weights = _result.model.named_steps["classifier"].coef_[0]
         _positives = _result.fold.training.filter(pl.col("target_60d"))
         _rows.append({
+            "Approach": _name,
             "Period": _result.fold.period,
             "Training rows": _result.fold.training_rows,
             "Breakouts represented in training": _positives.select("user_id", "artist_id").n_unique(),
             "Recent share weight": round(float(_weights[0]), 3),
             "Earlier listening weight": round(float(_weights[1]), 3),
+            "Interaction weight": round(float(_weights[2]), 3) if len(_weights) == 3 else None,
         })
-    mo.ui.table(pl.DataFrame(_rows), selection=None)
+    mo.ui.table(pl.DataFrame(_rows), selection=None, page_size=max(1, len(_rows)))
     return
 
 
 @app.cell(hide_code=True)
-def _(baseline_evaluation, mo, model_evaluation, paired_events):
+def _(baseline_evaluation, interaction_evaluation, interaction_vs_model, mo, model_evaluation, paired_events):
     _baseline = baseline_evaluation.event_summary.row(0, named=True)
     _model = model_evaluation.event_summary.row(0, named=True)
     _counts = dict(paired_events.group_by("change").len().iter_rows())
+    _interaction = interaction_evaluation.event_summary.row(0, named=True)
+    _changes = dict(interaction_vs_model.group_by("change").len().iter_rows())
     mo.md(f"""
     ## What do these results show?
 
-    - Detected breakouts: **{_baseline['detected_events']} → {_model['detected_events']}**.
-    - Anticipatory detections: **{_baseline['anticipatory_detections']} → {_model['anticipatory_detections']}**.
-    - Among events both approaches detected: **{_counts.get('Earlier', 0)} earlier**, **{_counts.get('Later', 0)} later**, and **{_counts.get('Same day', 0)} unchanged**.
-    - The model adds **{_counts.get('Newly detected', 0)}** detections and loses **{_counts.get('Lost detection', 0)}**.
+    - Detected breakouts, baseline → additive → interaction: **{_baseline['detected_events']} → {_model['detected_events']} → {_interaction['detected_events']}**.
+    - Anticipatory detections: **{_baseline['anticipatory_detections']} → {_model['anticipatory_detections']} → {_interaction['anticipatory_detections']}**.
+    - Against the additive model, the interaction moves **{_changes.get('Earlier', 0)}** detections earlier and **{_changes.get('Later', 0)}** later; **{_changes.get('Same day', 0)}** stay unchanged.
+    - It recovers **{_changes.get('Newly detected', 0)}** additive misses and loses **{_changes.get('Lost detection', 0)}** additive detections.
 
     More anticipatory detections are useful only when considered alongside coverage losses and delays elsewhere. The period comparison shows whether the changes are spread through the history.
     """)
@@ -496,6 +581,8 @@ def _(
     fold_results,
     mo,
     model_evaluation,
+    interaction_evaluation,
+    interaction_fold_results,
     record_button,
     record_comparison,
 ):
@@ -506,6 +593,8 @@ def _(
         fold_results=fold_results,
         context=comparison_context,
         project_root=Path("."),
+        interaction_model=interaction_evaluation,
+        interaction_fold_results=interaction_fold_results,
     )
     mo.md(f"Recorded comparison: `{_run_id}`.")
     return

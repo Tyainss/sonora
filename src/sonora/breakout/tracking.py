@@ -16,7 +16,10 @@ from mlflow import MlflowClient
 from mlflow.environment_variables import MLFLOW_DISABLE_TELEMETRY
 from mlflow.models import infer_signature
 
-from sonora.breakout.diagnostics import diagnose_lost_detections
+from sonora.breakout.diagnostics import (
+    diagnose_lost_detections,
+    review_detection_changes,
+)
 from sonora.breakout.evaluation.comparison import compare_event_detections
 from sonora.breakout.evaluation.evaluate import EvaluationResult
 from sonora.breakout.evaluation.events import TOP_K
@@ -124,31 +127,58 @@ def record_comparison(
     fold_results: list[LogisticFoldResult],
     context: ComparisonContext,
     project_root: Path,
+    interaction_model: EvaluationResult | None = None,
+    interaction_fold_results: list[LogisticFoldResult] | None = None,
 ) -> str:
-    """Write one comparison run to SQLite and local artifacts; return its run ID.
+    """Record the baseline, additive model, and optional interaction in one run.
 
     Recording disables MLflow usage telemetry and preserves the active run/URI.
     Undefined metrics stay null in result artifacts and are omitted from metrics.
     """
-    if not fold_results:
-        raise ValueError("At least one fitted fold is required")
-    baseline_keys = baseline.rankings.select(CANDIDATE_KEYS).sort(CANDIDATE_KEYS)
-    model_keys = model.rankings.select(CANDIDATE_KEYS).sort(CANDIDATE_KEYS)
-    fold_keys = pl.concat(
-        [result.scores.select(CANDIDATE_KEYS) for result in fold_results]
-    ).sort(CANDIDATE_KEYS)
-    if not baseline_keys.equals(model_keys) or not model_keys.equals(fold_keys):
+    if (interaction_model is None) != (interaction_fold_results is None):
         raise ValueError(
-            "Both evaluations and fitted folds must use the same candidates"
+            "Interaction evaluation and fitted folds must be supplied together"
         )
+    approaches = [("model", model, fold_results)]
+    if interaction_model is not None:
+        approaches.append(("interaction", interaction_model, interaction_fold_results))
+    baseline_keys = baseline.rankings.select(CANDIDATE_KEYS).sort(CANDIDATE_KEYS)
     development_end = dt.date.fromisoformat(
         context.holdout["boundaries"]["development_end"]
     )
-    if model_keys["scoring_date"].max() > development_end:
-        raise ValueError(
-            "A development comparison cannot include reserved scoring dates"
+    paired_results = []
+    for name, evaluation, results in approaches:
+        if not results:
+            raise ValueError("At least one fitted fold is required")
+        keys = evaluation.rankings.select(CANDIDATE_KEYS).sort(CANDIDATE_KEYS)
+        fold_keys = pl.concat(
+            [result.scores.select(CANDIDATE_KEYS) for result in results]
+        ).sort(CANDIDATE_KEYS)
+        if not baseline_keys.equals(keys) or not keys.equals(fold_keys):
+            raise ValueError(
+                "Both evaluations and fitted folds must use the same candidates"
+            )
+        if keys["scoring_date"].max() > development_end:
+            raise ValueError(
+                "A development comparison cannot include reserved scoring dates"
+            )
+        paired_results.append(
+            (
+                name,
+                compare_event_detections(
+                    baseline.event_results, evaluation.event_results
+                ),
+            )
         )
-    paired = compare_event_detections(baseline.event_results, model.event_results)
+    if interaction_model is not None:
+        paired_results.append(
+            (
+                "interaction_vs_model",
+                compare_event_detections(
+                    model.event_results, interaction_model.event_results
+                ),
+            )
+        )
     MLFLOW_DISABLE_TELEMETRY.set(True)
     storage = (project_root / TRACKING_DIRECTORY).resolve()
     storage.mkdir(parents=True, exist_ok=True)
@@ -166,7 +196,8 @@ def record_comparison(
     run = client.create_run(
         experiment_id,
         tags={
-            "mlflow.runName": "listening-share-vs-logistic-regression",
+            "mlflow.runName": "listening-share-vs-logistic-regression"
+            + ("-and-interaction" if interaction_model is not None else ""),
             "mlflow.source.git.commit": context.git_commit,
             "git.dirty": str(context.git_dirty).lower(),
             "evaluation.scope": "development",
@@ -178,10 +209,6 @@ def record_comparison(
         params = {
             "baseline": "recent_listening_share",
             "baseline.window_days": RECENT_SHARE_DAYS,
-            "model": "logistic_regression",
-            "model.features": ",".join(MODEL_FEATURES),
-            "model.previous_count_transform": "log1p",
-            "model.scaling": "StandardScaler fitted per training fold",
             "ranking": "decision_function; exact ties use baseline ordering",
             "horizon_days": DEFAULT_HORIZON_DAYS,
             "top_k": TOP_K,
@@ -194,14 +221,34 @@ def record_comparison(
                 f"holdout.{key}": value
                 for key, value in context.holdout["boundaries"].items()
             },
-            **{
-                f"model.{key}": value
-                for key, value in fold_results[0]
-                .model.named_steps["classifier"]
-                .get_params()
-                .items()
-            },
         }
+        for name, _, results in approaches:
+            has_interaction = "interaction" in results[0].model.named_steps
+            params.update(
+                {
+                    name: "logistic_regression",
+                    f"{name}.features": ",".join(MODEL_FEATURES),
+                    f"{name}.previous_count_transform": "log1p",
+                    f"{name}.scaling": "StandardScaler fitted per training fold",
+                    f"{name}.interaction": has_interaction,
+                    f"{name}.terms": "share,log1p_count"
+                    + (",share_x_log1p_count" if has_interaction else ""),
+                    **{
+                        f"{name}.{key}": value
+                        for key, value in results[0]
+                        .model.named_steps["classifier"]
+                        .get_params()
+                        .items()
+                    },
+                }
+            )
+            if any(
+                ("interaction" in result.model.named_steps) != has_interaction
+                for result in results
+            ):
+                raise ValueError(
+                    "A model variant must use the same terms in every fold"
+                )
         for key, value in params.items():
             client.log_param(run_id, key, str(value))
         with TemporaryDirectory(prefix="sonora-comparison-") as temporary:
@@ -210,7 +257,10 @@ def record_comparison(
                 path = destination / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(contents, encoding="utf-8")
-            for name, evaluation in [("baseline", baseline), ("model", model)]:
+            for name, evaluation in [
+                ("baseline", baseline),
+                *[(name, evaluation) for name, evaluation, _ in approaches],
+            ]:
                 directory = destination / name
                 directory.mkdir()
                 for table in [
@@ -229,68 +279,86 @@ def record_comparison(
                     for key, value in summary.row(0, named=True).items():
                         if isinstance(value, (int, float)) and math.isfinite(value):
                             client.log_metric(run_id, f"{name}.{key}", float(value))
-            paired.write_parquet(destination / "paired_events.parquet")
-            diagnostics = diagnose_lost_detections(baseline, model, fold_results)
-            directory = destination / "diagnostics/lost_detections"
-            directory.mkdir(parents=True)
-            for table in ["summary", "daily_ranks", "displacements"]:
-                getattr(diagnostics, table).write_parquet(
-                    directory / f"{table}.parquet"
+            for name, paired in paired_results:
+                prefix = "paired" if name == "model" else f"{name}.paired"
+                file = (
+                    "paired_events.parquet"
+                    if name == "model"
+                    else f"{name}_paired_events.parquet"
                 )
-            changes = dict(paired.group_by("change").len().iter_rows())
-            for change in [
-                "Earlier",
-                "Later",
-                "Same day",
-                "Newly detected",
-                "Lost detection",
-                "Missed by both",
-            ]:
-                key = change.lower().replace(" ", "_")
-                client.log_metric(run_id, f"paired.{key}", changes.get(change, 0))
-            median = paired["days_earlier"].median()
-            if median is not None:
-                client.log_metric(run_id, "paired.median_days_earlier", float(median))
-            folds = []
-            for result in fold_results:
-                fold = result.fold
-                inputs = (
-                    fold.scoring.select(pl.col(MODEL_FEATURES).cast(pl.Float64))
-                    .head(5)
-                    .to_numpy()
+                paired.write_parquet(destination / file)
+                changes = dict(paired.group_by("change").len().iter_rows())
+                for change in [
+                    "Earlier",
+                    "Later",
+                    "Same day",
+                    "Newly detected",
+                    "Lost detection",
+                    "Missed by both",
+                ]:
+                    client.log_metric(
+                        run_id,
+                        f"{prefix}.{change.lower().replace(' ', '_')}",
+                        changes.get(change, 0),
+                    )
+                median = paired["days_earlier"].median()
+                if median is not None:
+                    client.log_metric(
+                        run_id, f"{prefix}.median_days_earlier", float(median)
+                    )
+            for name, evaluation, results in approaches:
+                base = destination if name == "model" else destination / name
+                diagnostics = diagnose_lost_detections(baseline, evaluation, results)
+                directory = base / "diagnostics/lost_detections"
+                directory.mkdir(parents=True)
+                for table in ["summary", "daily_ranks", "displacements"]:
+                    getattr(diagnostics, table).write_parquet(
+                        directory / f"{table}.parquet"
+                    )
+                review_detection_changes(baseline, evaluation, results).write_parquet(
+                    base / "diagnostics/event_review.parquet"
                 )
-                folder = destination / "folds" / fold.period.replace(" ", "_")
-                folder.mkdir(parents=True)
-                result.scores.write_parquet(folder / "scores.parquet")
-                mlflow.sklearn.save_model(
-                    result.model,
-                    folder / "model",
-                    signature=infer_signature(inputs, result.model.predict(inputs)),
-                    input_example=inputs,
-                    pip_requirements=context.model_requirements,
-                    metadata={
-                        "feature_order": list(MODEL_FEATURES),
-                        "ranking_method": "decision_function",
-                    },
-                )
-                folds.append(
-                    {
-                        "period": fold.period,
-                        "scoring_start": fold.scoring_start,
-                        "scoring_end": fold.scoring_end,
-                        "training_cutoff": fold.training_cutoff,
-                        "is_partial": fold.is_partial,
-                        "training_rows": fold.training_rows,
-                        "scoring_rows": fold.scoring_rows,
-                        "positive_training_rows": fold.training["target_60d"].sum(),
-                        "training_breakout_artists": fold.training.filter(
-                            pl.col("target_60d")
-                        )
-                        .select("user_id", "artist_id")
-                        .n_unique(),
-                    }
-                )
-            pl.DataFrame(folds).write_parquet(destination / "folds.parquet")
+                folds = []
+                for result in results:
+                    fold = result.fold
+                    inputs = (
+                        fold.scoring.select(pl.col(MODEL_FEATURES).cast(pl.Float64))
+                        .head(5)
+                        .to_numpy()
+                    )
+                    folder = base / "folds" / fold.period.replace(" ", "_")
+                    folder.mkdir(parents=True)
+                    result.scores.write_parquet(folder / "scores.parquet")
+                    mlflow.sklearn.save_model(
+                        result.model,
+                        folder / "model",
+                        signature=infer_signature(inputs, result.model.predict(inputs)),
+                        input_example=inputs,
+                        pip_requirements=context.model_requirements,
+                        metadata={
+                            "feature_order": list(MODEL_FEATURES),
+                            "ranking_method": "decision_function",
+                            "interaction": "interaction" in result.model.named_steps,
+                        },
+                    )
+                    folds.append(
+                        {
+                            "period": fold.period,
+                            "scoring_start": fold.scoring_start,
+                            "scoring_end": fold.scoring_end,
+                            "training_cutoff": fold.training_cutoff,
+                            "is_partial": fold.is_partial,
+                            "training_rows": fold.training_rows,
+                            "scoring_rows": fold.scoring_rows,
+                            "positive_training_rows": fold.training["target_60d"].sum(),
+                            "training_breakout_artists": fold.training.filter(
+                                pl.col("target_60d")
+                            )
+                            .select("user_id", "artist_id")
+                            .n_unique(),
+                        }
+                    )
+                pl.DataFrame(folds).write_parquet(base / "folds.parquet")
             client.log_artifacts(run_id, str(destination))
     except Exception:
         client.set_terminated(run_id, status="FAILED")

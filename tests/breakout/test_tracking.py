@@ -330,3 +330,82 @@ def test_reserved_dates_cannot_be_recorded_as_development_results(comparison):
             project_root=root,
         )
     assert not (root / "artifacts/mlflow").exists()
+
+
+def test_three_way_comparison_records_interaction_metrics_review_and_reloadable_models(
+    comparison,
+):
+    root, paths, _, _, context, folds, (baseline, model) = comparison
+    periods = [
+        EvaluationPeriod(
+            r.fold.period, r.fold.scoring_start, r.fold.scoring_end, r.fold.is_partial
+        )
+        for r in folds
+    ]
+    interaction_folds = run_logistic_walk_forward(
+        pl.read_parquet(paths.daily_breakout_targets),
+        periods,
+        baseline.rankings.select("user_id", "artist_id", "scoring_date", "score"),
+        interaction=True,
+    )
+    interaction = evaluate_scores(
+        pl.concat([r.scores for r in interaction_folds]),
+        pl.concat([r.fold.scoring for r in interaction_folds]),
+        pl.read_parquet(paths.breakout_events),
+        oos_start=periods[0].scoring_start,
+        oos_end=periods[-1].scoring_end,
+    )
+    run_id = record_comparison(
+        baseline=baseline,
+        model=model,
+        fold_results=folds,
+        context=context,
+        project_root=root,
+        interaction_model=interaction,
+        interaction_fold_results=interaction_folds,
+    )
+    client = MlflowClient(
+        tracking_uri=f"sqlite:///{(root / 'artifacts/mlflow/mlflow.db').as_posix()}"
+    )
+    run = client.get_run(run_id)
+    assert run.info.status == "FINISHED"
+    assert run.data.params["model.interaction"] == "False"
+    assert run.data.params["interaction.interaction"] == "True"
+    assert (
+        run.data.params["interaction.terms"] == "share,log1p_count,share_x_log1p_count"
+    )
+    assert (
+        run.data.metrics["interaction.detected_events"]
+        == interaction.event_summary["detected_events"].item()
+    )
+    assert "interaction_vs_model.paired.same_day" in run.data.metrics
+    review = pl.read_parquet(
+        client.download_artifacts(
+            run_id, "interaction/diagnostics/event_review.parquet"
+        )
+    )
+    assert review.height == 1
+    result = interaction_folds[0]
+    local = client.download_artifacts(run_id, "interaction/folds/2022_H1/model")
+    restored = mlflow.sklearn.load_model(local)
+    inputs = result.fold.scoring.select(
+        pl.col(MODEL_FEATURES).cast(pl.Float64)
+    ).to_numpy()
+    assert restored.named_steps["classifier"].n_features_in_ == 3
+    np.testing.assert_array_equal(
+        restored.decision_function(inputs), result.model.decision_function(inputs)
+    )
+
+
+def test_interaction_evaluation_requires_its_fitted_models_before_recording(comparison):
+    root, _, _, _, context, folds, (baseline, model) = comparison
+    with pytest.raises(ValueError, match="supplied together"):
+        record_comparison(
+            baseline=baseline,
+            model=model,
+            fold_results=folds,
+            context=context,
+            project_root=root,
+            interaction_model=model,
+        )
+    assert not (root / "artifacts/mlflow").exists()
