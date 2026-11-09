@@ -4,6 +4,11 @@ data/**/*.partial
 data/raw/lastfm/scrobbles.integrity.json
 data/raw/lastfm/scrobbles.integrity.failed.*.json
 
+*.html
+*.zip
+*_handoff.md
+*.patch
+/artifacts/mlflow/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

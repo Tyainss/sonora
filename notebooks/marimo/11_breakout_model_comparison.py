@@ -1,0 +1,857 @@
+import marimo
+
+__generated_with = "0.23.16"
+app = marimo.App(width="medium")
+
+
+@app.cell
+def _():
+    import datetime as dt
+    import json
+    from pathlib import Path
+
+    import marimo as mo
+    import polars as pl
+
+    from sonora.breakout import build_modeling_data, score_recent_listening_share
+    from sonora.breakout.diagnostics import (
+        diagnose_lost_detections,
+        review_detection_changes,
+    )
+    from sonora.breakout.evaluation import (
+        EvaluationPeriod,
+        build_evaluation_periods,
+        build_walk_forward_folds,
+        combine_score_streams,
+        evaluate_scores,
+    )
+    from sonora.breakout.evaluation.comparison import compare_event_detections
+    from sonora.breakout.evaluation.holdout import load_or_create_holdout
+    from sonora.breakout.modeling import (
+        run_boosted_tree_walk_forward,
+        run_logistic_walk_forward,
+    )
+    from sonora.breakout.timing import audit_detection_timing
+    from sonora.breakout.tracking import capture_comparison_context, record_comparison
+    from sonora.data.paths import DEFAULT_DATA_PATHS
+
+    paths = DEFAULT_DATA_PATHS
+    return (
+        EvaluationPeriod,
+        Path,
+        audit_detection_timing,
+        build_evaluation_periods,
+        build_modeling_data,
+        build_walk_forward_folds,
+        capture_comparison_context,
+        combine_score_streams,
+        compare_event_detections,
+        diagnose_lost_detections,
+        dt,
+        evaluate_scores,
+        json,
+        load_or_create_holdout,
+        mo,
+        paths,
+        pl,
+        record_comparison,
+        review_detection_changes,
+        run_boosted_tree_walk_forward,
+        run_logistic_walk_forward,
+        score_recent_listening_share,
+    )
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Can listening history help detect breakouts earlier?
+
+    I compare **7-day listening share**, three **Logistic Regression** variants, and **gradient-boosted trees**. The logistic models use recent share and log-transformed earlier listens. The interaction adds their product; recency adds the prior-listening gap and a missing-history flag. Earlier history excludes the most recent seven days.
+
+    All approaches rank the same artists on the same dates. Detection requires two Top-3 appearances within the 60 days before confirmation, reduced to one when only one eligible day exists. Recency LR fills missing gaps with its training fold's median; logistic scaling is also fitted on the training fold.
+    Trees use the same three raw inputs as recency LR, with native missing-value handling. Their configuration is fixed across folds: 100 rounds, learning rate 0.05, depth at most 3, at most 7 leaves, at least 100 rows per leaf, and L2 regularization 1. Automatic early stopping is disabled.
+    """)
+    return
+
+
+@app.cell
+def _(
+    EvaluationPeriod,
+    Path,
+    build_evaluation_periods,
+    capture_comparison_context,
+    dt,
+    json,
+    load_or_create_holdout,
+    paths,
+    pl,
+):
+    _metadata = json.loads(paths.breakout_build_metadata.read_text(encoding="utf-8"))
+    _users = [user for user in _metadata["users"] if user["status"] == "built"]
+    if len(_users) != 1:
+        raise ValueError("This analysis notebook expects one built user")
+    _user = _users[0]
+    _user_id = _user["user_id"]
+    _coverage_end = dt.date.fromisoformat(_user["last_complete_date"]) + dt.timedelta(days=1)
+    holdout = load_or_create_holdout(
+        Path("artifacts/breakout/first_ml_holdout.json"),
+        user_id=_user_id,
+        generation="first_ml",
+        observation_coverage_end=_coverage_end,
+    )
+    comparison_context = capture_comparison_context(
+        project_root=Path("."),
+        paths=paths,
+        build_metadata=_metadata,
+        holdout_path=Path("artifacts/breakout/first_ml_holdout.json"),
+    )
+    evaluation_start = dt.date(dt.date.fromisoformat(_user["score_start"]).year + 1, 1, 1)
+    periods = [
+        EvaluationPeriod(
+            period.period,
+            period.scoring_start,
+            min(period.scoring_end, holdout.development_end),
+            period.is_partial or period.scoring_end > holdout.development_end,
+        )
+        for period in build_evaluation_periods(evaluation_start, _coverage_end)
+        if period.scoring_start <= holdout.development_end
+    ]
+    if not periods:
+        raise ValueError("No development scoring period precedes the holdout")
+    development_targets = (
+        pl.scan_parquet(paths.daily_breakout_targets)
+        .filter((pl.col("user_id") == _user_id) & (pl.col("scoring_date") <= holdout.development_end))
+        .collect()
+    )
+    development_events = (
+        pl.scan_parquet(paths.breakout_events)
+        .filter(
+            (pl.col("user_id") == _user_id)
+            & (pl.col("confirmation_date") <= holdout.development_end + dt.timedelta(days=1))
+        )
+        .collect()
+    )
+    user_listening = (
+        pl.scan_parquet(paths.curated_listening_events)
+        .filter(
+            (pl.col("user_id") == _user_id)
+            & (pl.col("listened_at") < dt.datetime.combine(holdout.lead_in_start, dt.time(), tzinfo=dt.UTC))
+        )
+        .collect()
+    )
+    artist_names = pl.read_parquet(paths.curated_artists).select("artist_id", "canonical_name")
+    return (
+        artist_names,
+        comparison_context,
+        development_events,
+        development_targets,
+        evaluation_start,
+        holdout,
+        periods,
+        user_listening,
+    )
+
+
+@app.cell(hide_code=True)
+def _(evaluation_start, holdout, mo):
+    mo.md(f"""
+    These rankings cover **{evaluation_start} to {holdout.development_end}**. The reserved prediction lead-in starts on **{holdout.lead_in_start}**, and the final event period starts on **{holdout.event_start}**.
+
+    Each model trains on labels whose full 60-day outcome was already available at the start of its scoring period. Scaling is fitted on that training history.
+    """)
+    return
+
+
+@app.cell
+def _(
+    build_modeling_data,
+    build_walk_forward_folds,
+    combine_score_streams,
+    compare_event_detections,
+    development_events,
+    development_targets,
+    evaluate_scores,
+    evaluation_start,
+    periods,
+    pl,
+    run_logistic_walk_forward,
+    run_boosted_tree_walk_forward,
+    review_detection_changes,
+    score_recent_listening_share,
+    user_listening,
+):
+    _data = build_modeling_data(user_listening, development_targets, recency=True)
+    _folds = build_walk_forward_folds(_data, periods)
+    expected_candidates = pl.concat([fold.scoring for fold in _folds])
+    baseline_scores = score_recent_listening_share(user_listening, expected_candidates)
+    fold_results = run_logistic_walk_forward(_data, periods, baseline_scores)
+    interaction_fold_results = run_logistic_walk_forward(_data, periods, baseline_scores, interaction=True)
+    recency_fold_results = run_logistic_walk_forward(_data, periods, baseline_scores, recency=True)
+    tree_fold_results = run_boosted_tree_walk_forward(_data, periods, baseline_scores)
+    _model_scores = combine_score_streams([result.scores for result in fold_results])
+    baseline_evaluation = evaluate_scores(
+        baseline_scores,
+        expected_candidates,
+        development_events,
+        oos_start=evaluation_start,
+        oos_end=periods[-1].scoring_end,
+    )
+    model_evaluation = evaluate_scores(
+        _model_scores,
+        expected_candidates,
+        development_events,
+        oos_start=evaluation_start,
+        oos_end=periods[-1].scoring_end,
+    )
+    paired_events = compare_event_detections(
+        baseline_evaluation.event_results, model_evaluation.event_results
+    )
+    interaction_evaluation = evaluate_scores(
+        combine_score_streams([result.scores for result in interaction_fold_results]),
+        expected_candidates, development_events,
+        oos_start=evaluation_start, oos_end=periods[-1].scoring_end,
+    )
+    interaction_vs_baseline = compare_event_detections(baseline_evaluation.event_results, interaction_evaluation.event_results)
+    interaction_vs_model = compare_event_detections(model_evaluation.event_results, interaction_evaluation.event_results)
+    event_review = review_detection_changes(baseline_evaluation, model_evaluation, fold_results)
+    recency_evaluation = evaluate_scores(
+        combine_score_streams([result.scores for result in recency_fold_results]),
+        expected_candidates, development_events,
+        oos_start=evaluation_start, oos_end=periods[-1].scoring_end,
+    )
+    recency_vs_baseline = compare_event_detections(baseline_evaluation.event_results, recency_evaluation.event_results)
+    recency_vs_model = compare_event_detections(model_evaluation.event_results, recency_evaluation.event_results)
+    recency_event_review = review_detection_changes(baseline_evaluation, recency_evaluation, recency_fold_results)
+    tree_evaluation = evaluate_scores(
+        combine_score_streams([result.scores for result in tree_fold_results]),
+        expected_candidates, development_events,
+        oos_start=evaluation_start, oos_end=periods[-1].scoring_end,
+    )
+    tree_vs_baseline = compare_event_detections(baseline_evaluation.event_results, tree_evaluation.event_results)
+    tree_vs_model = compare_event_detections(model_evaluation.event_results, tree_evaluation.event_results)
+    tree_vs_recency = compare_event_detections(recency_evaluation.event_results, tree_evaluation.event_results)
+    tree_event_review = review_detection_changes(baseline_evaluation, tree_evaluation, tree_fold_results)
+    return baseline_evaluation, event_review, fold_results, interaction_evaluation, interaction_fold_results, interaction_vs_baseline, interaction_vs_model, model_evaluation, paired_events, recency_evaluation, recency_fold_results, recency_vs_baseline, recency_vs_model, recency_event_review, tree_evaluation, tree_fold_results, tree_vs_baseline, tree_vs_model, tree_vs_recency, tree_event_review
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Does the model preserve coverage and detect more artists early?
+
+    Anticipatory means before breakout listening starts. Early means during its first important week. Late means after that week, but before confirmation.
+    """)
+    return
+
+
+@app.cell
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl, recency_evaluation, tree_evaluation):
+    def _row(name, evaluation):
+        _summary = evaluation.event_summary.row(0, named=True)
+        _events = evaluation.event_results.filter(pl.col("is_comparable") & pl.col("is_scoreable"))
+        return {
+            "Approach": name,
+            "Detected / scoreable": f"{_summary['detected_events']} / {_summary['scoreable_events']}",
+            "Coverage": None if _summary["event_coverage_at_3"] is None else f"{_summary['event_coverage_at_3']:.1%}",
+            "Anticipatory": _summary["anticipatory_detections"],
+            "Early": _events.filter(pl.col("timing_stage") == "Early").height,
+            "Late": _events.filter(pl.col("timing_stage") == "Late").height,
+            "Missed": _events.filter(pl.col("timing_stage") == "Missed").height,
+            "Median days before start": _summary["days_to_breakout_start_median"],
+        }
+    mo.ui.table(
+        pl.DataFrame([_row("7-day listening share", baseline_evaluation), _row("Additive LR", model_evaluation), _row("Interaction LR", interaction_evaluation), _row("Recency LR", recency_evaluation), _row("Boosted trees", tree_evaluation)]),
+        selection=None,
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(baseline_evaluation, mo, model_evaluation):
+    _baseline = baseline_evaluation.event_summary.row(0, named=True)
+    _model = model_evaluation.event_summary.row(0, named=True)
+    mo.md(f"""
+    All five approaches evaluate the same **{_baseline['scoreable_events']}** scoreable events. **{_baseline['anticipatable_events']}** had an eligible day before breakout listening started.
+
+    The median timing uses detected events only. Positive days mean detection before breakout starts; negative days mean detection after it starts. The paired comparison below shows timing changes for the same events.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Do the positive labels reward anticipation or an ongoing breakout?
+
+    A positive artist-day is an eligible artist on a date whose first confirmation falls within the next 60 days. **Before start** means before breakout listening begins; **Started; awaiting confirmation** includes the start date through the day before confirmation.
+
+    The start date is used only for retrospective analysis. It is not a model input. Expanding training folds reuse history, so their counts must not be added together.
+    """)
+    return
+
+
+@app.cell
+def _(audit_detection_timing, baseline_evaluation, development_events, fold_results, interaction_evaluation, model_evaluation, recency_evaluation, tree_evaluation):
+    timing_audit = audit_detection_timing(
+        {"baseline": baseline_evaluation, "additive": model_evaluation, "interaction": interaction_evaluation, "recency": recency_evaluation, "tree": tree_evaluation},
+        fold_results,
+        development_events,
+    )
+    return (timing_audit,)
+
+
+@app.cell
+def _(mo, pl, timing_audit):
+    _before = timing_audit.training_summary.filter(pl.col("stage") == "Before start").select(
+        pl.col("period").alias("Period"),
+        pl.col("positive_days").alias("Before start: positive days"),
+        (100 * pl.col("positive_day_share")).round(1).alias("Before start: share (%)"),
+        (100 * pl.col("zero_share_fraction")).round(1).alias("Before start: no recent plays (%)"),
+    )
+    _started = timing_audit.training_summary.filter(pl.col("stage") == "Started; awaiting confirmation").select(
+        pl.col("period").alias("Period"),
+        pl.col("positive_days").alias("Started: positive days"),
+    )
+    mo.ui.table(_before.join(_started, on="Period", how="left", validate="1:1"), selection=None, page_size=max(1, _before.height))
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pl, timing_audit):
+    _before = timing_audit.training_summary.filter(pl.col("stage") == "Before start")
+    mo.stop(_before.is_empty(), mo.md("There are no positive training days before breakout start."))
+    _latest = _before.sort("period").tail(1).row(0, named=True)
+    mo.md(f"""
+    In the latest fold, **{_latest['positive_day_share']:.1%}** of positive training days precede breakout start. Of those days, **{_latest['zero_share_fraction']:.1%}** have no plays of that artist in the previous seven days.
+
+    Positive labels reward both anticipation and an ongoing breakout. Their composition alone does not establish which stage drives the fitted model.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## How do rankings perform before and after breakout starts?
+
+    These rows cover the same fully comparable events as the event comparison. **Top-3 days (%)** counts each eligible positive artist-day. **Mean per-event Top-3 days (%)** first calculates that rate for each event, then averages the rates equally. Neither is an event detection rate: detection still requires enough distinct Top-3 days.
+    """)
+    return
+
+
+@app.cell
+def _(mo, pl, timing_audit):
+    _context = timing_audit.ranking_summary.filter(pl.col("approach") == "baseline").select(
+        pl.col("stage").alias("Stage"),
+        pl.col("breakout_artists").alias("Events with eligible days"),
+        pl.col("positive_days").alias("Eligible artist-days"),
+        (100 * pl.col("zero_share_fraction")).round(1).alias("No recent plays (%)"),
+        (100 * pl.col("median_share")).round(2).alias("Median recent share (%)"),
+        pl.col("median_previous_count").alias("Median earlier listens"),
+    )
+    _ranks = timing_audit.ranking_summary.select(
+        pl.col("approach").alias("Approach"),
+        pl.col("stage").alias("Stage"),
+        pl.col("top3_days").alias("Top-3 artist-days"),
+        (100 * pl.col("top3_day_rate")).round(1).alias("Top-3 days (%)"),
+        (100 * pl.col("mean_event_top3_day_rate")).round(1).alias("Mean per-event Top-3 days (%)"),
+        pl.col("median_rank").alias("Median rank"),
+    )
+    mo.vstack([mo.ui.table(_context, selection=None), mo.ui.table(_ranks, selection=None)])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pl, timing_audit):
+    _days = timing_audit.ranking_summary.filter((pl.col("approach") == "baseline") & (pl.col("stage") == "Before start"))
+    mo.stop(_days.is_empty(), mo.md("These events have no eligible scoring days before breakout start."))
+    _before = _days.row(0, named=True)
+    mo.md(f"""
+    **{_before['zero_share_days']:,} of {_before['positive_days']:,}** eligible pre-start artist-days have no recent plays. The two model inputs then reduce to zero recent share and an earlier listening count.
+
+    Both stages contribute to the existing daily ranking metrics. These results show where ranking succeeds, but do not establish that changing the training labels would improve anticipation. The stage populations and listening conditions differ.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Which detections moved earlier or later?
+    """)
+    return
+
+
+@app.cell
+def _(interaction_vs_baseline, interaction_vs_model, mo, paired_events, pl, recency_vs_baseline, recency_vs_model, tree_vs_baseline, tree_vs_model, tree_vs_recency):
+    _rows = []
+    for _name, _paired in [("Additive vs baseline", paired_events), ("Interaction vs baseline", interaction_vs_baseline), ("Interaction vs additive", interaction_vs_model), ("Recency vs baseline", recency_vs_baseline), ("Recency vs additive", recency_vs_model), ("Trees vs baseline", tree_vs_baseline), ("Trees vs additive", tree_vs_model), ("Trees vs recency", tree_vs_recency)]:
+        _counts = dict(_paired.group_by("change").len().iter_rows())
+        _rows.append({"Comparison": _name, **{change: _counts.get(change, 0) for change in ["Earlier", "Later", "Same day", "Newly detected", "Lost detection", "Missed by both"]}, "Median days earlier (both detected)": _paired["days_earlier"].median()})
+    mo.ui.table(
+        pl.DataFrame(_rows),
+        selection=None,
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, paired_events):
+    _days = paired_events["days_earlier"].drop_nulls()
+    _median = _days.median()
+    _timing = "unavailable" if _median is None else f"{_median:g} days"
+    mo.md(f"""
+    For events both the additive model and baseline detect, the median change is **{_timing}**. Positive values mean the candidate detects earlier than its reference; negative values mean it detects later.
+    """)
+    return
+
+
+@app.cell
+def _(artist_names, mo, paired_events, pl):
+    _details = pl.concat(
+        [
+            paired_events.filter(pl.col("change").is_in(["Newly detected", "Lost detection"])),
+            paired_events.filter(pl.col("change") == "Earlier").sort("days_earlier", descending=True).head(5),
+            paired_events.filter(pl.col("change") == "Later").sort("days_earlier").head(5),
+        ]
+    ).join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("change").alias("Change"),
+        pl.col("reference_detection_date").alias("Baseline date"),
+        pl.col("model_detection_date").alias("Model date"),
+        pl.col("days_earlier").alias("Days earlier"),
+    )
+    mo.accordion({"Additive model: new/lost detections and the five largest timing changes": mo.ui.table(_details, selection=None, page_size=max(1, _details.height))})
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Does earlier listening distinguish gains from delays?
+
+    Entry is the artist's first eligible day in the event's evaluation window. Earlier listens exclude the seven days before entry. The groups describe history at that date, not whether an artist is globally new or familiar.
+    """)
+    return
+
+
+@app.cell
+def _(event_review, mo, pl, recency_event_review, tree_event_review):
+    _rows = []
+    for _name, _review in [("Additive LR", event_review), ("Recency LR", recency_event_review), ("Boosted trees", tree_event_review)]:
+        for _group in ["No earlier listens", "Earlier listens"]:
+            _events = _review.filter(pl.col("history_at_entry") == _group)
+            _counts = dict(_events.group_by("change").len().iter_rows())
+            _rows.append({"Approach vs baseline": _name, "History at entry": _group, "Events": _events.height, **{change: _counts.get(change, 0) for change in ["Earlier", "Later", "Same day", "Newly detected", "Lost detection", "Missed by both"]}})
+    mo.ui.table(pl.DataFrame(_rows), selection=None)
+    return
+
+
+@app.cell
+def _(artist_names, event_review, mo, pl):
+    _views = {}
+    for _change in ["Earlier", "Later"]:
+        _cases = event_review.filter(pl.col("change") == _change).sort("days_earlier", descending=_change == "Earlier").join(artist_names, on="artist_id", how="left", validate="m:1").select(
+            pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+            pl.col("days_earlier").alias("Days earlier"),
+            pl.col("history_at_entry").alias("History at entry"),
+            pl.col("entry_previous_count").cast(pl.Int64).alias("Earlier listens at entry"),
+            pl.col("reference_detection_date").alias("Baseline detection"),
+            pl.col("model_detection_date").alias("Additive detection"),
+            (100 * pl.col("baseline_detection_share")).round(2).alias("Share at baseline detection (%)"),
+            (100 * pl.col("model_detection_share")).round(2).alias("Share at additive detection (%)"),
+        )
+        _views[_change] = mo.ui.table(_cases, selection=None, page_size=max(1, _cases.height))
+    mo.accordion(_views)
+    return
+
+
+@app.cell(hide_code=True)
+def _(event_review, mo, pl):
+    _earlier = event_review.filter(pl.col("change") == "Earlier")
+    _later = event_review.filter(pl.col("change") == "Later")
+    _earlier_history = _earlier.filter(pl.col("entry_previous_count") > 0).height
+    _later_zero = _later.filter(pl.col("entry_previous_count") == 0).height
+    mo.md(f"""
+    **{_earlier_history}/{_earlier.height}** earlier detections had earlier listens at entry. **{_later_zero}/{_later.height}** delayed detections had none. The full event counts above put these changes alongside unchanged detections and misses.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Why did the additive model miss breakouts the baseline caught?
+
+    Each event needs enough eligible Top-3 days before confirmation. The summary counts the full evaluation window; the details show days when either approach ranked the artist in its Top 3.
+    """)
+    return
+
+
+@app.cell
+def _(baseline_evaluation, diagnose_lost_detections, fold_results, model_evaluation):
+    lost_diagnostics = diagnose_lost_detections(baseline_evaluation, model_evaluation, fold_results)
+    return (lost_diagnostics,)
+
+
+@app.cell
+def _(artist_names, lost_diagnostics, mo, pl):
+    _summary = lost_diagnostics.summary.join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("reference_detection_date").alias("Baseline detection"),
+        pl.col("valid_opportunities").alias("Eligible days"),
+        pl.col("required_top3_appearances").alias("Required Top-3 days"),
+        pl.col("baseline_top3_days").alias("Baseline Top-3 days"),
+        pl.col("model_top3_days").alias("Model Top-3 days"),
+        pl.col("best_model_rank").alias("Best model rank"),
+    )
+    mo.ui.table(_summary, selection=None) if not _summary.is_empty() else mo.md("The model lost no detections in this comparison.")
+    return
+
+
+@app.cell
+def _(artist_names, lost_diagnostics, mo, pl):
+    mo.stop(lost_diagnostics.summary.is_empty())
+    _cases = {}
+    for _event in lost_diagnostics.summary.join(artist_names, on="artist_id", how="left", validate="m:1").to_dicts():
+        _artist = _event["artist_id"]
+        _user = _event["user_id"]
+        _name = _event["canonical_name"] or _artist
+        _days = lost_diagnostics.daily_ranks.filter(
+            (pl.col("user_id") == _user) & (pl.col("artist_id") == _artist)
+            & ((pl.col("baseline_rank") <= 3) | (pl.col("model_rank") <= 3))
+        ).select(
+            pl.col("scoring_date").alias("Date"),
+            pl.col("baseline_rank").alias("Baseline rank"),
+            pl.col("model_rank").alias("Model rank"),
+            (100 * pl.col("listening_share_7d")).round(2).alias("Recent share (%)"),
+            pl.col("previous_listening_count").cast(pl.Int64).alias("Earlier listens"),
+        )
+        _promotions = lost_diagnostics.displacements.filter(
+            (pl.col("user_id") == _user) & (pl.col("artist_id") == _artist)
+        ).join(
+            artist_names.rename({"artist_id": "promoted_artist_id"}),
+            on="promoted_artist_id", how="left", validate="m:1",
+        ).select(
+            pl.col("scoring_date").alias("Date"),
+            pl.col("canonical_name").fill_null(pl.col("promoted_artist_id")).alias("Promoted artist"),
+            pl.col("promoted_baseline_rank").alias("Baseline rank"),
+            pl.col("promoted_model_rank").alias("Model rank"),
+            (100 * pl.col("promoted_listening_share_7d")).round(2).alias("Recent share (%)"),
+            pl.col("promoted_previous_listening_count").cast(pl.Int64).alias("Earlier listens"),
+            pl.col("share_advantage").round(3).alias("Recent-share advantage"),
+            pl.col("previous_count_advantage").round(3).alias("Earlier-listening advantage"),
+            pl.col("model_advantage").round(3).alias("Model score lead"),
+        )
+        _cases[_name] = mo.vstack([
+            mo.md("**Days in either Top 3**"),
+            mo.ui.table(_days, selection=None, page_size=max(1, _days.height)),
+            mo.md("**Artists promoted from outside the baseline Top 3**"),
+            mo.ui.table(_promotions, selection=None, page_size=max(1, _promotions.height)),
+        ])
+    mo.accordion(_cases)
+    return
+
+
+@app.cell(hide_code=True)
+def _(lost_diagnostics, mo, pl):
+    mo.stop(lost_diagnostics.summary.is_empty())
+    _promotions = lost_diagnostics.displacements
+    _overturns = _promotions.filter(
+        (pl.col("share_advantage") < 0)
+        & (pl.col("previous_count_advantage") > 0)
+        & (pl.col("model_advantage") > 0)
+    ).height
+    mo.md(f"""
+    In **{_overturns} of {_promotions.height}** listed promotions, an earlier-listening advantage outweighed a recent-share disadvantage.
+
+    The two feature advantages add up to the promoted artist's model score lead, using the fitted model for that day. These are decision-score differences, not probabilities. Several artists can enter or leave the Top 3 on the same day.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Which additive detections does recency recover or lose?
+
+    Gap measures earlier listening recency, excluding the most recent seven days. Missing gaps indicate no earlier listens; their numerical fill and missing-history flag are separate model terms.
+    """)
+    return
+
+
+@app.cell
+def _(artist_names, mo, pl, recency_vs_model):
+    _details = recency_vs_model.filter(pl.col("change").is_in(["Newly detected", "Lost detection"])).join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("change").alias("Recency vs additive"),
+        pl.col("reference_detection_date").alias("Additive detection"),
+        pl.col("model_detection_date").alias("Recency detection"),
+    )
+    mo.ui.table(_details, selection=None, page_size=max(1, _details.height))
+    return
+
+
+@app.cell
+def _(baseline_evaluation, diagnose_lost_detections, recency_evaluation, recency_fold_results):
+    recency_lost_diagnostics = diagnose_lost_detections(baseline_evaluation, recency_evaluation, recency_fold_results)
+    return (recency_lost_diagnostics,)
+
+
+@app.cell
+def _(artist_names, mo, pl, recency_lost_diagnostics):
+    _lost = recency_lost_diagnostics.summary.join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("baseline_top3_days").alias("Baseline Top-3 days"),
+        pl.col("model_top3_days").alias("Recency Top-3 days"),
+        pl.col("best_model_rank").alias("Best recency rank"),
+    )
+    _promotions = recency_lost_diagnostics.displacements.join(
+        artist_names, on="artist_id", how="left", validate="m:1",
+    ).join(
+        artist_names.rename({"artist_id": "promoted_artist_id", "canonical_name": "promoted_name"}),
+        on="promoted_artist_id", how="left", validate="m:1",
+    ).select(
+        pl.col("scoring_date").alias("Date"),
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Lost artist"),
+        pl.col("promoted_name").fill_null(pl.col("promoted_artist_id")).alias("Promoted artist"),
+        pl.col("prior_listening_gap_days").alias("Lost artist: prior gap (days)"),
+        pl.col("promoted_prior_listening_gap_days").alias("Promoted artist: prior gap (days)"),
+        pl.col("share_advantage").round(3).alias("Share advantage"),
+        pl.col("previous_count_advantage").round(3).alias("Earlier-count advantage"),
+        pl.col("prior_gap_advantage").round(3).alias("Gap advantage"),
+        pl.col("no_history_advantage").round(3).alias("Missing-history advantage"),
+        pl.col("model_advantage").round(3).alias("Model score lead"),
+    )
+    mo.accordion({"Recency misses detected by the baseline": mo.ui.table(_lost, selection=None), "Feature contributions on displaced Top-3 days": mo.ui.table(_promotions, selection=None)})
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Which breakouts do trees recover or lose?
+
+    These comparisons use the same eligible scoring days. Tree scores combine conditional rules; the details report raw inputs and ranks without assigning linear feature contributions.
+    """)
+    return
+
+
+@app.cell
+def _(artist_names, baseline_evaluation, diagnose_lost_detections, mo, pl, tree_evaluation, tree_fold_results, tree_vs_model, tree_vs_recency):
+    _changes = []
+    for _name, _paired in [("Trees vs additive", tree_vs_model), ("Trees vs recency", tree_vs_recency)]:
+        _changes.append(_paired.filter(pl.col("change").is_in(["Newly detected", "Lost detection"])).join(artist_names, on="artist_id", how="left", validate="m:1").select(
+            pl.lit(_name).alias("Comparison"),
+            pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+            pl.col("change").alias("Change"),
+            pl.col("reference_detection_date").alias("Reference detection"),
+            pl.col("model_detection_date").alias("Tree detection"),
+        ))
+    _lost = diagnose_lost_detections(baseline_evaluation, tree_evaluation, tree_fold_results)
+    _summary = _lost.summary.join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("baseline_top3_days").alias("Baseline Top-3 days"),
+        pl.col("model_top3_days").alias("Tree Top-3 days"),
+        pl.col("best_model_rank").alias("Best tree rank"),
+    )
+    _days = _lost.daily_ranks.filter((pl.col("baseline_rank") <= 3) | (pl.col("model_rank") <= 3)).join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("scoring_date").alias("Date"),
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("baseline_rank").alias("Baseline rank"),
+        pl.col("model_rank").alias("Tree rank"),
+        (100 * pl.col("listening_share_7d")).round(2).alias("Recent share (%)"),
+        pl.col("previous_listening_count").alias("Earlier listens"),
+        pl.col("prior_listening_gap_days").alias("Prior gap (days)"),
+    )
+    mo.vstack([mo.ui.table(pl.concat(_changes), selection=None), mo.accordion({"Tree misses detected by the baseline": mo.ui.table(_summary, selection=None), "Eligible days in either Top 3": mo.ui.table(_days, selection=None)})])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Is the result consistent across periods?
+
+    Events are grouped by when their breakout was confirmed. Small event counts make percentages less reliable.
+    """)
+    return
+
+
+@app.cell
+def _(artist_names, interaction_vs_model, mo, pl):
+    _changed = interaction_vs_model.filter(pl.col("change").is_in(["Newly detected", "Lost detection"])).join(artist_names, on="artist_id", how="left", validate="m:1").select(
+        pl.col("canonical_name").fill_null(pl.col("artist_id")).alias("Artist"),
+        pl.col("change").alias("Interaction vs additive"),
+        pl.col("reference_detection_date").alias("Additive detection"),
+        pl.col("model_detection_date").alias("Interaction detection"),
+    )
+    mo.accordion({"Which additive detections did the interaction recover or lose?": mo.ui.table(_changed, selection=None, page_size=max(1, _changed.height))})
+    return
+
+
+@app.cell
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, periods, pl, recency_evaluation, tree_evaluation):
+    _baseline = baseline_evaluation.period_summary.select(
+        pl.col("confirmation_period").alias("Period"),
+        pl.col("scoreable_events").alias("Events"),
+        (100 * pl.col("event_coverage_at_3")).round(1).alias("Baseline coverage (%)"),
+        pl.col("anticipatory_detections").alias("Baseline anticipatory"),
+    )
+    _model = model_evaluation.period_summary.select(
+        pl.col("confirmation_period").alias("Period"),
+        (100 * pl.col("event_coverage_at_3")).round(1).alias("Model coverage (%)"),
+        pl.col("anticipatory_detections").alias("Model anticipatory"),
+    )
+    _status = pl.DataFrame({"Period": [period.period for period in periods], "Partial period": [period.is_partial for period in periods]})
+    _interaction = interaction_evaluation.period_summary.select(
+        pl.col("confirmation_period").alias("Period"),
+        (100 * pl.col("event_coverage_at_3")).round(1).alias("Interaction coverage (%)"),
+        pl.col("anticipatory_detections").alias("Interaction anticipatory"),
+    )
+    _recency = recency_evaluation.period_summary.select(
+        pl.col("confirmation_period").alias("Period"),
+        (100 * pl.col("event_coverage_at_3")).round(1).alias("Recency coverage (%)"),
+        pl.col("anticipatory_detections").alias("Recency anticipatory"),
+    )
+    _tree = tree_evaluation.period_summary.select(
+        pl.col("confirmation_period").alias("Period"),
+        (100 * pl.col("event_coverage_at_3")).round(1).alias("Tree coverage (%)"),
+        pl.col("anticipatory_detections").alias("Tree anticipatory"),
+    )
+    mo.ui.table(_baseline.join(_model, on="Period", validate="1:1").join(_interaction, on="Period", validate="1:1").join(_recency, on="Period", validate="1:1").join(_tree, on="Period", validate="1:1").join(_status, on="Period", validate="1:1"), selection=None)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Is the daily Top 3 more useful?
+
+    Top-3 Capture measures how many future breakout artists fit into the available shortlist. NDCG gives more credit when they appear near the top. Both use days with at least one future breakout.
+    """)
+    return
+
+
+@app.cell
+def _(baseline_evaluation, interaction_evaluation, mo, model_evaluation, pl, recency_evaluation, tree_evaluation):
+    _rows = []
+    for _name, _evaluation in [("7-day listening share", baseline_evaluation), ("Additive LR", model_evaluation), ("Interaction LR", interaction_evaluation), ("Recency LR", recency_evaluation), ("Boosted trees", tree_evaluation)]:
+        _summary = _evaluation.daily_summary.row(0, named=True)
+        _rows.append({
+            "Approach": _name,
+            "Days with a future breakout": _summary["opportunity_days"],
+            "Top-3 Capture (%)": None if _summary["mean_top3_capture"] is None else round(100 * _summary["mean_top3_capture"], 1),
+            "NDCG@3 (%)": None if _summary["mean_ndcg_at_3"] is None else round(100 * _summary["mean_ndcg_at_3"], 1),
+        })
+    mo.ui.table(pl.DataFrame(_rows), selection=None)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## What did the logistic models learn?
+
+    Each weight applies to a standardized term. The interaction model uses recent share × log-transformed earlier listens. The recency model uses gap in days and a missing-history flag. A negative gap weight favours more recent earlier listening, with other inputs fixed.
+    """)
+    return
+
+
+@app.cell
+def _(fold_results, interaction_fold_results, mo, pl, recency_fold_results):
+    _rows = []
+    for _name, _result in [("Additive LR", result) for result in fold_results] + [("Interaction LR", result) for result in interaction_fold_results] + [("Recency LR", result) for result in recency_fold_results]:
+        _weights = _result.model.named_steps["classifier"].coef_[0]
+        _positives = _result.fold.training.filter(pl.col("target_60d"))
+        _has_gap = "prior_gap" in _result.model.named_steps["transform"].named_transformers_
+        _rows.append({
+            "Approach": _name,
+            "Period": _result.fold.period,
+            "Training rows": _result.fold.training_rows,
+            "Breakouts represented in training": _positives.select("user_id", "artist_id").n_unique(),
+            "Recent share weight": round(float(_weights[0]), 3),
+            "Earlier listening weight": round(float(_weights[1]), 3),
+            "Interaction weight": round(float(_weights[2]), 3) if len(_weights) == 3 else None,
+            "Prior-gap weight": round(float(_weights[2]), 3) if _has_gap else None,
+            "No earlier history weight": round(float(_weights[3]), 3) if _has_gap else None,
+            "Training median gap (days)": float(_result.model.named_steps["transform"].named_transformers_["prior_gap"].statistics_[0]) if _has_gap else None,
+        })
+    mo.ui.table(pl.DataFrame(_rows), selection=None, page_size=max(1, len(_rows)))
+    return
+
+
+@app.cell(hide_code=True)
+def _(baseline_evaluation, interaction_evaluation, interaction_vs_model, mo, model_evaluation, paired_events, recency_evaluation, recency_vs_model, tree_evaluation, tree_vs_recency):
+    _baseline = baseline_evaluation.event_summary.row(0, named=True)
+    _model = model_evaluation.event_summary.row(0, named=True)
+    _counts = dict(paired_events.group_by("change").len().iter_rows())
+    _interaction = interaction_evaluation.event_summary.row(0, named=True)
+    _changes = dict(interaction_vs_model.group_by("change").len().iter_rows())
+    _recency = recency_evaluation.event_summary.row(0, named=True)
+    _recency_changes = dict(recency_vs_model.group_by("change").len().iter_rows())
+    _tree = tree_evaluation.event_summary.row(0, named=True)
+    _tree_changes = dict(tree_vs_recency.group_by("change").len().iter_rows())
+    mo.md(f"""
+    ## What do these results show?
+
+    - Detected breakouts, baseline → additive → interaction → recency → trees: **{_baseline['detected_events']} → {_model['detected_events']} → {_interaction['detected_events']} → {_recency['detected_events']} → {_tree['detected_events']}**.
+    - Anticipatory detections: **{_baseline['anticipatory_detections']} → {_model['anticipatory_detections']} → {_interaction['anticipatory_detections']} → {_recency['anticipatory_detections']} → {_tree['anticipatory_detections']}**.
+    - Against the additive model, the interaction moves **{_changes.get('Earlier', 0)}** detections earlier and **{_changes.get('Later', 0)}** later; **{_changes.get('Same day', 0)}** stay unchanged.
+    - It recovers **{_changes.get('Newly detected', 0)}** additive misses and loses **{_changes.get('Lost detection', 0)}** additive detections.
+    - Against additive, recency moves **{_recency_changes.get('Earlier', 0)}** detections earlier and **{_recency_changes.get('Later', 0)}** later; it recovers **{_recency_changes.get('Newly detected', 0)}** misses and loses **{_recency_changes.get('Lost detection', 0)}** detections.
+
+    - Against recency LR, trees move **{_tree_changes.get('Earlier', 0)}** detections earlier and **{_tree_changes.get('Later', 0)}** later; they recover **{_tree_changes.get('Newly detected', 0)}** misses and lose **{_tree_changes.get('Lost detection', 0)}** detections.
+
+    More anticipatory detections are useful only when considered alongside coverage losses and delays elsewhere. The period comparison shows whether the changes are spread through the history.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    record_button = mo.ui.run_button(label="Record comparison in MLflow")
+    record_button
+    return (record_button,)
+
+
+@app.cell
+def _(
+    Path,
+    baseline_evaluation,
+    comparison_context,
+    fold_results,
+    mo,
+    model_evaluation,
+    interaction_evaluation,
+    interaction_fold_results,
+    timing_audit,
+    recency_evaluation,
+    recency_fold_results,
+    tree_evaluation,
+    tree_fold_results,
+    record_button,
+    record_comparison,
+):
+    mo.stop(not record_button.value)
+    _run_id = record_comparison(
+        baseline=baseline_evaluation,
+        model=model_evaluation,
+        fold_results=fold_results,
+        context=comparison_context,
+        project_root=Path("."),
+        interaction_model=interaction_evaluation,
+        interaction_fold_results=interaction_fold_results,
+        timing_audit=timing_audit,
+        recency_model=recency_evaluation,
+        recency_fold_results=recency_fold_results,
+        tree_model=tree_evaluation,
+        tree_fold_results=tree_fold_results,
+    )
+    mo.md(f"Recorded comparison: `{_run_id}`.")
+    return
+
+
+if __name__ == "__main__":
+    app.run()
