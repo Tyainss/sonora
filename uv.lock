@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -1721,15 +1721,15 @@ wheels = [
 
 [[package]]
 name = "lastfm-export"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/e8/74cf95d94844686a6c36fd47db4f4facb27b2751013afe922f1d2f5269ba/lastfm_export-0.3.0.tar.gz", hash = "sha256:2c496abba185d2ed8139f16b2c96fcba729429a817d05c931540b37f63de4d36", size = 64487, upload-time = "2026-08-10T23:07:15.882Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/9f/82e10414419075d6684b9aca8dfe0e63b39c8fc76f9bd6280e9ff50e0070/lastfm_export-0.4.0.tar.gz", hash = "sha256:7583ca6248069cdd526428de1a08604b3bf97b3eace288748eab33a067b94dfa", size = 82442, upload-time = "2026-10-19T18:43:04.158Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/33/59b3a0a4cf688decca881d6527850165875700278fcc20a1230cef5413f8/lastfm_export-0.3.0-py3-none-any.whl", hash = "sha256:d33b912d1f652a2ad0d3c84125e205b6b62eef1c820ac65e0f16c136b4601477", size = 28943, upload-time = "2026-08-10T23:07:15.036Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/96/73e8b6434ab2c99f5cf8288fbeb883ffbf3ca37eb4a316223b70e544c737/lastfm_export-0.4.0-py3-none-any.whl", hash = "sha256:afe642d631f8a1f423395674b417cc970cd12f6b8ab9a20c53e58987d22e4c6b", size = 42749, upload-time = "2026-10-19T18:43:03.283Z" },
 ]
 
 [package.optional-dependencies]
@@ -2537,7 +2537,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -3766,7 +3766,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lastfm-export", extras = ["dotenv"], specifier = ">=0.3.0" },
+    { name = "lastfm-export", extras = ["dotenv"], specifier = ">=0.4.0" },
     { name = "marimo", specifier = ">=0.23.16" },
     { name = "mlflow", specifier = ">=3.17.0" },
     { name = "numpy", specifier = ">=2.0" },
