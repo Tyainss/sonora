@@ -55,9 +55,7 @@ def get_breakout_watchlist(
     cutoff = datetime.combine(scoring_date, time.min, tzinfo=UTC)
     listening = (
         pl.scan_parquet(paths.curated_listening_events)
-        .filter(
-            (pl.col("user_id") == user_id) & (pl.col("listened_at") < cutoff)
-        )
+        .filter((pl.col("user_id") == user_id) & (pl.col("listened_at") < cutoff))
         .select("user_id", "artist_id", "listened_at")
         .collect()
     )
@@ -82,11 +80,8 @@ def get_breakout_watchlist(
     artists = pl.read_parquet(paths.curated_artists).select(
         "artist_id", "canonical_name"
     )
-    if (
-        artists["artist_id"].n_unique() != artists.height
-        or any(
-            artists[column].null_count() for column in ("artist_id", "canonical_name")
-        )
+    if artists["artist_id"].n_unique() != artists.height or any(
+        artists[column].null_count() for column in ("artist_id", "canonical_name")
     ):
         raise ValueError("Canonical artists must have unique, non-null identities")
     result = (
@@ -101,4 +96,3 @@ def get_breakout_watchlist(
         pl.col(name).cast(dtype).alias(name) for name, dtype in WATCHLIST_SCHEMA.items()
     ]
     return result.select(columns)
-

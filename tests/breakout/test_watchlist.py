@@ -87,9 +87,7 @@ def test_watchlist_top_three_and_point_in_time(tmp_path):
     assert watchlist["artist_id"].to_list() == ["a", "b", "c"]
     assert watchlist["canonical_name"].to_list() == ["A", "B", "C"]
     assert watchlist["rank"].to_list() == [1, 2, 3]
-    assert watchlist["listening_share_7d"].to_list() == pytest.approx(
-        [0.4, 0.3, 0.2]
-    )
+    assert watchlist["listening_share_7d"].to_list() == pytest.approx([0.4, 0.3, 0.2])
     assert watchlist["artist_scrobbles_7d"].to_list() == [4, 3, 2]
     assert watchlist["user_scrobbles_7d"].to_list() == [10, 10, 10]
     assert watchlist["prior_scrobbles"].to_list() == [4, 3, 2]
@@ -196,15 +194,9 @@ def test_date_specific_eligibility_matches_historical_daily_targets():
 
 def test_confirmed_breakout_drops_from_watchlist_on_confirmation_day(tmp_path):
     paths = DataPaths(tmp_path)
-    rows = [
-        ("u", f"background_{i}", listen(n))
-        for i in range(10)
-        for n in range(65)
-    ]
+    rows = [("u", f"background_{i}", listen(n)) for i in range(10) for n in range(65)]
     rows += [
-        ("u", "target", listen(n, 16))
-        for n in (45, 47, 52, 54)
-        for _ in range(100)
+        ("u", "target", listen(n, 16)) for n in (45, 47, 52, 54) for _ in range(100)
     ]
     write_data(paths, rows)
     listening = pl.read_parquet(paths.curated_listening_events)

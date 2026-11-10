@@ -62,9 +62,7 @@ def build_evaluation_periods(
     start = evaluation_start
     while start <= final_date:
         natural_start = (
-            dt.date(start.year, 1, 1)
-            if start.month <= 6
-            else dt.date(start.year, 7, 1)
+            dt.date(start.year, 1, 1) if start.month <= 6 else dt.date(start.year, 7, 1)
         )
         natural_end = (
             dt.date(start.year, 6, 30)
