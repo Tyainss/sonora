@@ -38,9 +38,7 @@ def summarize_event_opportunities(event_results: pl.DataFrame) -> pl.DataFrame:
                     ~pl.col("is_scoreable")
                 ).height,
                 "anticipatable_events": anticipatable_events,
-                "anticipatable_share": _ratio(
-                    anticipatable_events, historical_events
-                ),
+                "anticipatable_share": _ratio(anticipatable_events, historical_events),
             }
         ]
     )

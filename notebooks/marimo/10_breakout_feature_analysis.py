@@ -1482,7 +1482,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(f"""
+    mo.md("""
     **Conclusion:** previous listening count is the clearest feature to test. Past peaks and gaps between listens are possible additions, but may largely describe the same listening habits.
 
     Track variety also shows no clear difference once days with fewer than 2 plays are excluded. Time since first listen and the number of previous listening days are lower priorities.
