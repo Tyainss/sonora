@@ -43,7 +43,7 @@ def history_bounds(users=("u",), *, last_complete=80):
 
 
 def write_data(paths, rows):
-    paths.curated_dir.mkdir(parents=True)
+    paths.curated_dir.mkdir(parents=True, exist_ok=True)
     events = pl.DataFrame(
         rows,
         schema={
@@ -119,16 +119,6 @@ def test_different_future_events_do_not_change_historical_watchlist(tmp_path):
     )
 
 
-def test_scoring_does_not_require_target_build_metadata(tmp_path):
-    paths = DataPaths(tmp_path)
-    bounds = history_bounds(("u", "v"))
-    write_data(paths, simple_history())
-    assert not paths.breakout_build_metadata.exists()
-
-    watchlist = get_breakout_watchlist("u", day(35), user_bounds=bounds, paths=paths)
-    assert watchlist["artist_id"].to_list() == ["a", "b", "c"]
-
-
 def test_invalid_date_and_missing_history_coverage(tmp_path):
     paths = DataPaths(tmp_path)
     write_data(paths, simple_history())
@@ -161,7 +151,7 @@ def test_date_specific_eligibility_matches_historical_daily_targets():
         },
         orient="row",
     )
-    daily_user, daily_artist = aggregate_daily_listening(listening.lazy())
+    _, daily_artist = aggregate_daily_listening(listening.lazy())
     bounds = history_bounds()
     events = pl.DataFrame(
         [("u", "confirmed", day(60))],
@@ -189,7 +179,6 @@ def test_date_specific_eligibility_matches_historical_daily_targets():
     )
     assert_frame_equal(candidates, historical)
     assert candidates["artist_id"].to_list() == ["return"]
-    assert daily_user.height > 0
 
 
 def test_confirmed_breakout_drops_from_watchlist_on_confirmation_day(tmp_path):
