@@ -13,9 +13,11 @@ from sonora.breakout.targets import (
     DEFAULT_HORIZON_DAYS,
     DEFAULT_RECENCY_DAYS,
     build_listening_gaps,
+    eligible_candidates_for_date,
     eligible_segments,
     make_daily_targets,
 )
+from sonora.breakout.watchlist import get_breakout_watchlist
 
 __all__ = [
     "DEFAULT_HORIZON_DAYS",
@@ -25,7 +27,9 @@ __all__ = [
     "build_listening_gaps",
     "build_modeling_data",
     "detect_first_breakouts",
+    "eligible_candidates_for_date",
     "eligible_segments",
+    "get_breakout_watchlist",
     "historical_user_bounds",
     "make_daily_targets",
     "score_listening_share_momentum",

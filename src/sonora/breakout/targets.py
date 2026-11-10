@@ -1,5 +1,7 @@
 """Point-in-time eligibility and daily first-breakout labels."""
 
+from datetime import date, datetime
+
 import polars as pl
 
 from sonora.breakout.history import available_user_bounds, validate_user_bounds
@@ -81,6 +83,36 @@ def eligible_segments(gaps: pl.DataFrame, recency_days: int) -> pl.DataFrame:
             "score_end",
         ).alias("eligible_end"),
     ).filter(pl.col("eligible_start") <= pl.col("eligible_end"))
+
+
+def eligible_candidates_for_date(
+    daily_artist: pl.DataFrame,
+    events: pl.DataFrame,
+    established: pl.DataFrame,
+    user_bounds: pl.DataFrame,
+    scoring_date: date,
+    *,
+    recency_days: int = DEFAULT_RECENCY_DAYS,
+) -> pl.DataFrame:
+    """Select eligible artist rows for one date without constructing labels."""
+    if not isinstance(scoring_date, date) or isinstance(scoring_date, datetime):
+        raise TypeError("scoring_date must be a date")
+    segments = eligible_segments(
+        build_listening_gaps(daily_artist, events, established, user_bounds),
+        recency_days,
+    )
+    return (
+        segments.filter(
+            (pl.col("eligible_start") <= scoring_date)
+            & (pl.col("eligible_end") >= scoring_date)
+        )
+        .select(
+            "user_id",
+            "artist_id",
+            pl.lit(scoring_date).cast(pl.Date).alias("scoring_date"),
+        )
+        .sort("user_id", "artist_id")
+    )
 
 
 def make_daily_targets(
