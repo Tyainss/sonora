@@ -1,0 +1,6 @@
+outs:
+- md5: 950bb5ed6ac1642539e425697bf811bb.dir
+  size: 5607132
+  nfiles: 3
+  hash: md5
+  path: artist_tags

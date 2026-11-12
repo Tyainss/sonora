@@ -3,3 +3,4 @@
 /tracks.parquet
 /track_aliases.parquet
 /listening_events.parquet
+/artist_tags.parquet
