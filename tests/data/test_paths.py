@@ -11,6 +11,9 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     assert paths.raw_lastfm_integrity == (
         tmp_path / "sonora-data/raw/lastfm/scrobbles.integrity.json"
     )
+    assert paths.raw_lastfm_artist_tags_dir == (
+        tmp_path / "sonora-data/raw/lastfm/artist_tags"
+    )
     assert paths.interim_dir == tmp_path / "sonora-data/interim"
     assert paths.listening_events_clean == (
         tmp_path / "sonora-data/interim/listening_events_clean.parquet"
@@ -18,6 +21,9 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     assert paths.curated_dir == tmp_path / "sonora-data/curated"
 
     assert paths.curated_artists == (tmp_path / "sonora-data/curated/artists.parquet")
+    assert paths.curated_artist_tags == (
+        tmp_path / "sonora-data/curated/artist_tags.parquet"
+    )
     assert paths.curated_artist_aliases == (
         tmp_path / "sonora-data/curated/artist_aliases.parquet"
     )
