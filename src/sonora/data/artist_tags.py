@@ -13,6 +13,11 @@ from lastfm_export.io.artist_metadata import load_manifest, read_collection
 from lastfm_export.models import ArtistInput
 from lastfm_export.pipelines.artist_metadata import collect_artist_metadata
 
+from sonora.data.artist_identity import (
+    ambiguous_artist_ids as _ambiguous_artist_ids,
+    artist_catalogue as _artist_catalogue,
+    name_key as _name_key,
+)
 from sonora.data.paths import DEFAULT_DATA_PATHS, DataPaths
 
 _TAG_SCHEMA = pl.List(pl.Struct({"name": pl.String, "weight": pl.Int64}))
@@ -41,36 +46,6 @@ class _Record:
     collected_at: str
     collection_id: str
     tags: list[dict]
-
-
-def _artist_catalogue(paths: DataPaths) -> dict[str, str]:
-    artists = pl.read_parquet(paths.curated_artists)
-    if dict(artists.schema) != {"artist_id": pl.String, "canonical_name": pl.String}:
-        raise ValueError("Unexpected canonical artist schema")
-    if artists.select(pl.any_horizontal(pl.all().is_null())).to_series().any():
-        raise ValueError("Canonical artist IDs and names must not be null")
-    if artists.get_column("artist_id").n_unique() != artists.height:
-        raise ValueError("Duplicate canonical artist IDs")
-    names = artists.get_column("canonical_name").to_list()
-    if any(not name.strip() for name in names):
-        raise ValueError("Empty canonical artist name")
-    return dict(artists.select("artist_id", "canonical_name").iter_rows())
-
-
-def _name_key(name: str) -> str:
-    return " ".join(name.split()).casefold()
-
-
-def _ambiguous_artist_ids(artists: dict[str, str]) -> set[str]:
-    by_name: dict[str, str] = {}
-    ambiguous = set()
-    for artist_id, name in artists.items():
-        key = _name_key(name)
-        if key in by_name:
-            ambiguous.update((artist_id, by_name[key]))
-        else:
-            by_name[key] = artist_id
-    return ambiguous
 
 
 def _read_mapping(path: Path) -> tuple[list[dict], bool]:

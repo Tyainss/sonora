@@ -25,6 +25,10 @@ class DataPaths:
         return self.raw_lastfm_dir / "artist_tags"
 
     @property
+    def raw_lastfm_artist_descriptions_dir(self) -> Path:
+        return self.raw_lastfm_dir / "artist_descriptions"
+
+    @property
     def interim_dir(self) -> Path:
         return self.data_dir / "interim"
 
@@ -43,6 +47,10 @@ class DataPaths:
     @property
     def curated_artist_tags(self) -> Path:
         return self.curated_dir / "artist_tags.parquet"
+
+    @property
+    def curated_artist_descriptions(self) -> Path:
+        return self.curated_dir / "artist_descriptions.parquet"
 
     @property
     def curated_artist_aliases(self) -> Path:
