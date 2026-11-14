@@ -1721,15 +1721,15 @@ wheels = [
 
 [[package]]
 name = "lastfm-export"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/59/9f/82e10414419075d6684b9aca8dfe0e63b39c8fc76f9bd6280e9ff50e0070/lastfm_export-0.4.0.tar.gz", hash = "sha256:7583ca6248069cdd526428de1a08604b3bf97b3eace288748eab33a067b94dfa", size = 82442, upload-time = "2026-10-19T18:43:04.158Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/bf/8e6e21828633ef4d22704d3a704432d1e58a2b8997ad2423bcbfcfb93ae6/lastfm_export-0.5.0.tar.gz", hash = "sha256:8306835d1b767e7438d76a795f174160085e4cf624694a93776965cf587626bc", size = 83597, upload-time = "2026-11-14T01:59:17.36Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/96/73e8b6434ab2c99f5cf8288fbeb883ffbf3ca37eb4a316223b70e544c737/lastfm_export-0.4.0-py3-none-any.whl", hash = "sha256:afe642d631f8a1f423395674b417cc970cd12f6b8ab9a20c53e58987d22e4c6b", size = 42749, upload-time = "2026-10-19T18:43:03.283Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/45/6a6edc8622856e1ec45c651314d85ecda76857662ed942204a52e458d899/lastfm_export-0.5.0-py3-none-any.whl", hash = "sha256:44e0dc2b6a0e24c83d90d2d4ce8a07a3e0d35d512526eeb50d66a911e25d324d", size = 43093, upload-time = "2026-11-14T01:59:16.154Z" },
 ]
 
 [package.optional-dependencies]
@@ -3766,7 +3766,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lastfm-export", extras = ["dotenv"], specifier = ">=0.4.0" },
+    { name = "lastfm-export", extras = ["dotenv"], specifier = ">=0.5.0" },
     { name = "marimo", specifier = ">=0.23.16" },
     { name = "mlflow", specifier = ">=3.17.0" },
     { name = "numpy", specifier = ">=2.0" },
