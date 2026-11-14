@@ -48,6 +48,38 @@ def test_binary_and_weighted_tags_rank_differently():
     assert weighted["similarity"][0] > weighted["similarity"][1]
 
 
+def test_tfidf_prioritizes_distinctive_shared_tags():
+    dataset = _artist_tags(
+        [
+            ("source", "Source", "success", [("rock", 100), ("jazz", 100)]),
+            ("rock1", "A Rocker", "success", [("rock", 100)]),
+            ("rock2", "B Rocker", "success", [("rock", 100)]),
+            ("rock3", "C Rocker", "success", [("rock", 100)]),
+            ("jazz", "Z Jazzer", "success", [("jazz", 100)]),
+        ]
+    )
+    vectors = build_artist_tag_vectors(dataset, clean_tags=True)
+
+    binary = find_similar_artists(vectors, "source", representation="binary")
+    tfidf = find_similar_artists(vectors, "source", representation="tfidf")
+
+    assert binary["artist_id"][0] == "rock1"
+    assert tfidf["artist_id"][0] == "jazz"
+    assert tfidf["similarity"][0] > tfidf["similarity"][1]
+
+
+def test_tfidf_excludes_artists_without_shared_tags():
+    vectors = build_artist_tag_vectors(
+        _artist_tags(
+            [
+                ("a", "Alpha", "success", [("rock", 100)]),
+                ("b", "Beta", "success", [("jazz", 100)]),
+            ]
+        )
+    )
+    assert find_similar_artists(vectors, "a", representation="tfidf").is_empty()
+
+
 def test_skips_missing_or_unverified_tags_and_does_not_return_zero_matches():
     vectors = build_artist_tag_vectors(
         _artist_tags(
@@ -111,7 +143,7 @@ def test_rejects_no_usable_tags_and_invalid_parameters():
         _artist_tags([("a", "Alpha", "success", [("rock", 100)])])
     )
     with pytest.raises(ValueError, match="Representation"):
-        find_similar_artists(vectors, "a", representation="tfidf")
+        find_similar_artists(vectors, "a", representation="unknown")
     with pytest.raises(ValueError, match="top_k"):
         find_similar_artists(vectors, "a", representation="binary", top_k=0)
 

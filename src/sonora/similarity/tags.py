@@ -6,6 +6,7 @@ import numpy as np
 import polars as pl
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction import DictVectorizer
+from sklearn.feature_extraction.text import TfidfTransformer
 from sklearn.preprocessing import normalize
 
 _RESULT_SCHEMA = {
@@ -75,12 +76,13 @@ class ArtistTagVectors:
     artists: pl.DataFrame
     binary: csr_matrix
     weighted: csr_matrix
+    tfidf: csr_matrix
 
 
 def build_artist_tag_vectors(
     artist_tags: pl.DataFrame, *, clean_tags: bool = False
 ) -> ArtistTagVectors:
-    """Build binary and Last.fm-weighted vectors from raw or cleaned tags."""
+    """Build binary, Last.fm-weighted, and TF-IDF vectors from artist tags."""
     required = {"artist_id", "canonical_name", "status", "tags"}
     if not required.issubset(artist_tags.columns):
         raise ValueError("Artist tags are missing required columns")
@@ -116,11 +118,13 @@ def build_artist_tag_vectors(
     weights = DictVectorizer(sparse=True).fit_transform(features).tocsr()
     binary = weights.copy()
     binary.data[:] = 1.0
+    tfidf = TfidfTransformer().fit_transform(binary).tocsr()
 
     return ArtistTagVectors(
         artists=artists,
         binary=normalize(binary),
         weighted=normalize(weights),
+        tfidf=tfidf,
     )
 
 
@@ -132,8 +136,8 @@ def find_similar_artists(
     top_k: int = 10,
 ) -> pl.DataFrame:
     """Rank other artists with shared tags by cosine similarity."""
-    if representation not in {"binary", "weighted"}:
-        raise ValueError("Representation must be 'binary' or 'weighted'")
+    if representation not in {"binary", "weighted", "tfidf"}:
+        raise ValueError("Representation must be 'binary', 'weighted', or 'tfidf'")
     if top_k < 1:
         raise ValueError("top_k must be positive")
 
@@ -142,7 +146,7 @@ def find_similar_artists(
         raise ValueError(f"Artist has no usable tags: {artist_id}")
 
     query_index = ids.index(artist_id)
-    matrix = vectors.binary if representation == "binary" else vectors.weighted
+    matrix = getattr(vectors, representation)
     similarities = (matrix @ matrix[query_index].T).toarray().ravel()
     similarities[query_index] = 0.0
     names = vectors.artists["canonical_name"].to_list()

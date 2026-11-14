@@ -229,5 +229,53 @@ def _(
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Does TF-IDF change the matches?
+
+    TF-IDF gives more importance to tags shared by fewer artists. Compare all three
+    representations using cleaned tags.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(artist_selector, cleaned_vectors, find_similar_artists, mo, pl):
+    _selected_id = artist_selector.value
+    if _selected_id not in cleaned_vectors.artists["artist_id"].to_list():
+        _output = mo.md("This artist has no usable cleaned tags.")
+    else:
+        _rankings = {
+            _label: find_similar_artists(
+                cleaned_vectors, _selected_id, representation=_representation, top_k=10
+            )
+            for _label, _representation in (
+                ("Binary", "binary"),
+                ("Weighted", "weighted"),
+                ("TF-IDF", "tfidf"),
+            )
+        }
+        _rows = []
+        for _rank in range(max(_ranking.height for _ranking in _rankings.values())):
+            _row = {"Rank": _rank + 1}
+            for _label, _ranking in _rankings.items():
+                _match = (
+                    _ranking.row(_rank, named=True) if _rank < _ranking.height else None
+                )
+                _row[_label] = _match["canonical_name"] if _match else ""
+                _row[f"{_label} score"] = (
+                    round(_match["similarity"], 3) if _match else None
+                )
+            _rows.append(_row)
+        _output = (
+            mo.ui.table(pl.DataFrame(_rows), selection=None, page_size=len(_rows))
+            if _rows
+            else mo.md("No matching artists.")
+        )
+    _output
+    return
+
+
 if __name__ == "__main__":
     app.run()
