@@ -10,19 +10,29 @@ def _():
     import polars as pl
 
     from sonora.data.paths import DEFAULT_DATA_PATHS
-    from sonora.similarity.tags import build_artist_tag_vectors, find_similar_artists
+    from sonora.similarity.tags import (
+        build_artist_tag_vectors,
+        clean_artist_tags,
+        find_similar_artists,
+    )
 
     paths = DEFAULT_DATA_PATHS
-    return build_artist_tag_vectors, find_similar_artists, mo, paths, pl
+    return (
+        build_artist_tag_vectors,
+        clean_artist_tags,
+        find_similar_artists,
+        mo,
+        paths,
+        pl,
+    )
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Do Last.fm tag weights improve artist similarity?
+    # How similar are artists based on Last.fm tags?
 
-    Compare **binary tags** (all tags count equally) with **weighted tags** (using Last.fm weights).
-    Both use cosine similarity and the original tag names.
+    Compare binary and Last.fm-weighted tags, then raw and cleaned rankings.
     """)
     return
 
@@ -76,7 +86,7 @@ def _(mo, vectors):
     return (artist_selector,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(artist_selector, artist_tags, find_similar_artists, mo, pl, vectors):
     _selected_id = artist_selector.value
     _row = artist_tags.filter(pl.col("artist_id") == _selected_id).row(0, named=True)
@@ -128,11 +138,94 @@ def _(artist_selector, artist_tags, find_similar_artists, mo, pl, vectors):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## What does this tell us?
-
-    Different rankings show that tag weights matter, but not which approach is better.
-    Check familiar artists to see which matches make more musical sense, especially when broad or noisy tags appear.
+    ## Does cleaning the tags change the matches?
     """)
+    return
+
+
+@app.cell
+def _(artist_tags, build_artist_tag_vectors):
+    cleaned_vectors = build_artist_tag_vectors(artist_tags, clean_tags=True)
+    return (cleaned_vectors,)
+
+
+@app.cell
+def _(mo):
+    representation_selector = mo.ui.dropdown(
+        options={"Binary": "binary", "Weighted": "weighted"},
+        value="Binary",
+        label="Representation",
+    )
+    representation_selector
+    return (representation_selector,)
+
+
+@app.cell(hide_code=True)
+def _(
+    artist_selector,
+    artist_tags,
+    clean_artist_tags,
+    cleaned_vectors,
+    find_similar_artists,
+    mo,
+    pl,
+    representation_selector,
+    vectors,
+):
+    _selected_id = artist_selector.value
+    _tags = (
+        artist_tags.filter(pl.col("artist_id") == _selected_id)
+        .row(0, named=True)["tags"]
+    )
+    _cleaned_tags = clean_artist_tags(_tags)
+    _raw_top = sorted(_tags, key=lambda tag: -tag["weight"])[:8]
+    _cleaned_top = sorted(_cleaned_tags, key=lambda tag: -tag["weight"])[:8]
+
+    def _describe(tags):
+        return ", ".join(f"{tag['name']} ({tag['weight']})" for tag in tags) or "None"
+
+    _representation = representation_selector.value
+    _raw = find_similar_artists(
+        vectors, _selected_id, representation=_representation, top_k=10
+    )
+    if _selected_id in cleaned_vectors.artists["artist_id"].to_list():
+        _cleaned = find_similar_artists(
+            cleaned_vectors, _selected_id, representation=_representation, top_k=10
+        )
+    else:
+        _cleaned = _raw.head(0)
+
+    _rows = []
+    for _index in range(max(_raw.height, _cleaned.height)):
+        _raw_row = _raw.row(_index, named=True) if _index < _raw.height else None
+        _cleaned_row = (
+            _cleaned.row(_index, named=True) if _index < _cleaned.height else None
+        )
+        _rows.append(
+            {
+                "Rank": _index + 1,
+                "Raw": _raw_row["canonical_name"] if _raw_row else "",
+                "Raw score": round(_raw_row["similarity"], 3) if _raw_row else None,
+                "Cleaned": _cleaned_row["canonical_name"] if _cleaned_row else "",
+                "Cleaned score": (
+                    round(_cleaned_row["similarity"], 3) if _cleaned_row else None
+                ),
+            }
+        )
+
+    _shared = len(set(_raw["artist_id"]) & set(_cleaned["artist_id"]))
+    mo.vstack(
+        [
+            mo.md(f"**Original tags:** {_describe(_raw_top)}"),
+            mo.md(f"**Cleaned tags:** {_describe(_cleaned_top)}"),
+            mo.ui.table(
+                pl.DataFrame(_rows), selection=None, page_size=max(1, len(_rows))
+            )
+            if _rows
+            else mo.md("No matching artists."),
+            mo.md(f"**{_shared} artists** appear in both top-ten lists."),
+        ]
+    )
     return
 
 

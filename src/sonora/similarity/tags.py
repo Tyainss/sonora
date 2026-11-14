@@ -1,3 +1,5 @@
+import re
+import unicodedata
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,6 +14,61 @@ _RESULT_SCHEMA = {
     "similarity": pl.Float64,
 }
 
+_NOISE_TAGS = {
+    "all",
+    "check out",
+    "lastfmsc",
+    "listen to later",
+    "must listen",
+    "my cup of tea",
+    "my top songs",
+    "recommended",
+    "spotify",
+    "top",
+    "to::listen::to",
+    ":to listen to in the future:",
+}
+_NOISE_PATTERNS = (
+    re.compile(r"funk add to lidarr batch \d+"),
+    re.compile(r"seen live(?: .+)?"),
+    re.compile(r"upcoming album \d{4}"),
+    re.compile(r"under \d+ listeners"),
+    re.compile(r"fdc \d{4} (?:composers|participants)"),
+)
+_TAG_ALIASES = {
+    "chillhop": "chill hop",
+    "down tempo": "downtempo",
+    "electropop": "electro pop",
+    "neosoul": "neo soul",
+    "synthpop": "synth pop",
+}
+
+
+def _clean_tag_name(name: str) -> str | None:
+    normalized = unicodedata.normalize("NFKC", name).casefold().strip()
+    normalized = re.sub(r"[\s_-]+", " ", normalized).strip()
+    if not normalized:
+        return None
+    if normalized in _NOISE_TAGS or any(
+        pattern.fullmatch(normalized) for pattern in _NOISE_PATTERNS
+    ):
+        return None
+    normalized = re.sub(r"\bhiphop\b", "hip hop", normalized)
+    normalized = re.sub(r"\blofi\b", "lo fi", normalized)
+    normalized = re.sub(r"\brnb\b", "r&b", normalized)
+    return _TAG_ALIASES.get(normalized, normalized)
+
+
+def clean_artist_tags(tags: list[dict]) -> list[dict]:
+    """Normalize tags, discard known noise, and keep the highest duplicate weight."""
+    weights: dict[str, int] = {}
+    for tag in tags:
+        name = _clean_tag_name(tag["name"])
+        if name is not None:
+            weight = tag["weight"]
+            weights[name] = max(weights.get(name, weight), weight)
+    return [{"name": name, "weight": weight} for name, weight in weights.items()]
+
 
 @dataclass(frozen=True)
 class ArtistTagVectors:
@@ -20,37 +77,48 @@ class ArtistTagVectors:
     weighted: csr_matrix
 
 
-def build_artist_tag_vectors(artist_tags: pl.DataFrame) -> ArtistTagVectors:
-    """Build binary and Last.fm-weighted vectors using the original tag names."""
+def build_artist_tag_vectors(
+    artist_tags: pl.DataFrame, *, clean_tags: bool = False
+) -> ArtistTagVectors:
+    """Build binary and Last.fm-weighted vectors from raw or cleaned tags."""
     required = {"artist_id", "canonical_name", "status", "tags"}
     if not required.issubset(artist_tags.columns):
         raise ValueError("Artist tags are missing required columns")
     if artist_tags["artist_id"].n_unique() != artist_tags.height:
         raise ValueError("Artist tags contain duplicate artist IDs")
 
-    artists = (
+    candidates = (
         artist_tags.filter(
             (pl.col("status") == "success") & (pl.col("tags").list.len() > 0)
         )
         .select("artist_id", "canonical_name", "tags")
         .sort("canonical_name", "artist_id")
     )
-    if artists.is_empty():
-        raise ValueError("No artists with usable tags")
-
     features = []
-    for tags in artists["tags"].to_list():
-        values = {tag["name"]: float(tag["weight"]) for tag in tags}
-        if any(weight < 0 for weight in values.values()):
+    artist_rows = []
+    for artist_id, canonical_name, tags in candidates.iter_rows():
+        if any(tag["weight"] < 0 for tag in tags):
             raise ValueError("Tag weights must be non-negative")
-        features.append(values)
+        if clean_tags:
+            tags = clean_artist_tags(tags)
+        values = {tag["name"]: float(tag["weight"]) for tag in tags}
+        if values:
+            features.append(values)
+            artist_rows.append((artist_id, canonical_name))
 
+    if not features:
+        raise ValueError("No artists with usable tags")
+    artists = pl.DataFrame(
+        artist_rows,
+        schema={"artist_id": pl.String, "canonical_name": pl.String},
+        orient="row",
+    )
     weights = DictVectorizer(sparse=True).fit_transform(features).tocsr()
     binary = weights.copy()
     binary.data[:] = 1.0
 
     return ArtistTagVectors(
-        artists=artists.drop("tags"),
+        artists=artists,
         binary=normalize(binary),
         weighted=normalize(weights),
     )

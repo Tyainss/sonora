@@ -1,7 +1,11 @@
 import polars as pl
 import pytest
 
-from sonora.similarity.tags import build_artist_tag_vectors, find_similar_artists
+from sonora.similarity.tags import (
+    build_artist_tag_vectors,
+    clean_artist_tags,
+    find_similar_artists,
+)
 
 
 def _artist_tags(rows):
@@ -110,3 +114,83 @@ def test_rejects_no_usable_tags_and_invalid_parameters():
         find_similar_artists(vectors, "a", representation="tfidf")
     with pytest.raises(ValueError, match="top_k"):
         find_similar_artists(vectors, "a", representation="binary", top_k=0)
+
+
+def test_cleaning_merges_equivalent_tags_using_the_highest_weight():
+    original = [
+        {"name": " Hip-Hop ", "weight": 100},
+        {"name": "hip hop", "weight": 24},
+        {"name": "LOFI", "weight": 40},
+        {"name": "Lo-Fi", "weight": 60},
+        {"name": "alternative rnb", "weight": 25},
+        {"name": "alternative r&b", "weight": 10},
+        {"name": "post-rock", "weight": 35},
+        {"name": "post rock", "weight": 50},
+    ]
+    assert clean_artist_tags(original) == [
+        {"name": "hip hop", "weight": 100},
+        {"name": "lo fi", "weight": 60},
+        {"name": "alternative r&b", "weight": 25},
+        {"name": "post rock", "weight": 50},
+    ]
+    assert original[0]["name"] == " Hip-Hop "
+
+
+def test_cleaning_removes_known_artifacts_without_discarding_context():
+    raw = [
+        ("All", 80),
+        ("my top songs", 70),
+        ("funk_add_to_lidarr_batch_18", 60),
+        ("seen live twice", 50),
+        ("FDC 2023 Composers", 40),
+        ("upcoming album 2024", 30),
+        ("under 2000 listeners", 20),
+        ("Spotify", 10),
+        ("american", 100),
+        ("female vocalists", 90),
+        ("portuguese", 80),
+        ("post-brexit new wave", 70),
+        ("live jazz", 60),
+        ("experimental hip-hop", 50),
+        ("rare niche style", 40),
+    ]
+    assert clean_artist_tags([{"name": name, "weight": weight} for name, weight in raw]) == [
+        {"name": "american", "weight": 100},
+        {"name": "female vocalists", "weight": 90},
+        {"name": "portuguese", "weight": 80},
+        {"name": "post brexit new wave", "weight": 70},
+        {"name": "live jazz", "weight": 60},
+        {"name": "experimental hip hop", "weight": 50},
+        {"name": "rare niche style", "weight": 40},
+    ]
+
+
+def test_cleaned_similarity_joins_aliases_and_excludes_artifact_only_artists():
+    dataset = _artist_tags(
+        [
+            ("a", "Alpha", "success", [("Hip-Hop", 100), ("hip hop", 10)]),
+            ("b", "Beta", "success", [("hiphop", 100)]),
+            ("c", "Charlie", "success", [("my top songs", 100)]),
+            ("d", "Delta", "success", [("rock", 100)]),
+        ]
+    )
+    raw = build_artist_tag_vectors(dataset)
+    cleaned = build_artist_tag_vectors(dataset, clean_tags=True)
+
+    assert raw.artists.height == 4
+    assert cleaned.artists["artist_id"].to_list() == ["a", "b", "d"]
+    assert find_similar_artists(raw, "a", representation="binary").is_empty()
+    assert find_similar_artists(cleaned, "a", representation="binary")[
+        "artist_id"
+    ].to_list() == ["b"]
+    assert find_similar_artists(cleaned, "a", representation="weighted")[
+        "similarity"
+    ][0] == pytest.approx(1.0)
+
+
+def test_negative_weights_are_rejected_even_if_cleaning_would_discard_them():
+    dataset = _artist_tags(
+        [("a", "Alpha", "success", [("my top songs", -1), ("rock", 100)])]
+    )
+    with pytest.raises(ValueError, match="non-negative"):
+        build_artist_tag_vectors(dataset, clean_tags=True)
