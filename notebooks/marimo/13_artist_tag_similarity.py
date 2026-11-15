@@ -127,7 +127,13 @@ def _(candidate_ids, mo, pl, vectors):
 
 @app.cell(hide_code=True)
 def _(
-    artist_selector, artist_tags, candidate_ids, rank_tag_candidates, mo, pl, vectors
+    artist_selector,
+    artist_tags,
+    candidate_ids,
+    mo,
+    pl,
+    rank_tag_candidates,
+    vectors,
 ):
     _selected_id = artist_selector.value
     _row = artist_tags.filter(pl.col("artist_id") == _selected_id).row(0, named=True)
@@ -214,9 +220,9 @@ def _(
     candidate_ids,
     clean_artist_tags,
     cleaned_vectors,
-    rank_tag_candidates,
     mo,
     pl,
+    rank_tag_candidates,
     representation_selector,
     vectors,
 ):
@@ -295,7 +301,14 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(artist_selector, candidate_ids, cleaned_vectors, rank_tag_candidates, mo, pl):
+def _(
+    artist_selector,
+    candidate_ids,
+    cleaned_vectors,
+    mo,
+    pl,
+    rank_tag_candidates,
+):
     _selected_id = artist_selector.value
     if _selected_id not in cleaned_vectors.artists["artist_id"].to_list():
         _output = mo.md("This artist has no usable cleaned tags.")
@@ -375,11 +388,11 @@ def _(
     artist_tags,
     candidate_ids,
     cleaned_vectors,
-    rank_tag_candidates,
     find_similar_summary_artists,
     find_similar_tag_artists,
     mo,
     pl,
+    rank_tag_candidates,
     summary_embeddings,
     tag_embeddings,
 ):
@@ -453,11 +466,11 @@ def _(
     artist_tags,
     cleaned_vectors,
     evaluation_snapshot,
-    rank_tag_candidates,
     find_similar_tag_artists,
     mo,
     paths,
     pl,
+    rank_tag_candidates,
     tag_embeddings,
 ):
     from sonora.similarity.evaluation import (
@@ -528,6 +541,92 @@ def _(
 
     _output
     return reference_rankings, reference_scores, reference_sets
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Which approach works better across artists?
+
+    Each approach shows **top 5 / top 10 / NDCG@10**. The counts are matches
+    out of five references. The NDCG difference is BGE-M3 minus TF-IDF;
+    positive values favour BGE-M3. The largest differences appear first.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pl, reference_scores):
+    if reference_scores is None:
+        _output = mo.md("No evaluation results available.")
+    else:
+        _sections = []
+        for _set in reference_scores["Reference set"].unique(maintain_order=True):
+            _scores = reference_scores.filter(pl.col("Reference set") == _set)
+            _by_artist = {}
+            for _score in _scores.iter_rows(named=True):
+                _by_artist.setdefault(_score["Artist"], {})[_score["Approach"]] = _score
+
+            def _metrics(score):
+                if score is None or not score["Available"]:
+                    return "Unavailable"
+                return (
+                    f"{score['Top 5']}/5 · {score['Top 10']}/5 · "
+                    f"{score['NDCG@10']:.3f}"
+                )
+
+            _rows = []
+            _wins = {"TF-IDF": 0, "BGE-M3 tags": 0, "Tie": 0}
+            for _artist, _approaches in _by_artist.items():
+                _tfidf = _approaches.get("TF-IDF")
+                _bge = _approaches.get("BGE-M3 tags")
+
+                _difference = None
+                _winner = "Unavailable"
+                if _tfidf and _bge and _tfidf["Available"] and _bge["Available"]:
+                    _difference = round(_bge["NDCG@10"] - _tfidf["NDCG@10"], 3)
+                    _winner = (
+                        "BGE-M3 tags"
+                        if _difference > 0
+                        else "TF-IDF"
+                        if _difference < 0
+                        else "Tie"
+                    )
+                    _wins[_winner] += 1
+
+                _rows.append(
+                    {
+                        "Artist": _artist,
+                        "TF-IDF": _metrics(_tfidf),
+                        "BGE-M3 tags": _metrics(_bge),
+                        "Better NDCG": _winner,
+                        "NDCG difference": _difference,
+                    }
+                )
+
+            _rows.sort(
+                key=lambda row: (
+                    row["NDCG difference"] is None,
+                    -abs(row["NDCG difference"] or 0),
+                    row["Artist"],
+                )
+            )
+            _compared = sum(_wins.values())
+            _sections.extend(
+                [
+                    mo.md(
+                        f"**{_set}** - NDCG@10 wins: BGE-M3 {_wins['BGE-M3 tags']}, "
+                        f"TF-IDF {_wins['TF-IDF']}, ties {_wins['Tie']} "
+                        f"({_compared} artists compared)."
+                    ),
+                    mo.ui.table(
+                        pl.DataFrame(_rows), selection=None, page_size=len(_rows)
+                    ),
+                ]
+            )
+        _output = mo.vstack(_sections)
+    _output
+    return
 
 
 @app.cell(hide_code=True)
