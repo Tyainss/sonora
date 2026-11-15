@@ -44,6 +44,41 @@ def _(build_artist_tag_vectors, paths, pl):
     return artist_tags, vectors
 
 
+@app.cell
+def _(paths):
+    from sonora.similarity.evaluation import load_artist_similarity_evaluation
+
+    evaluation_snapshot = (
+        load_artist_similarity_evaluation(paths=paths)
+        if paths.artist_similarity_evaluation.exists()
+        else None
+    )
+    candidate_ids = (
+        set(evaluation_snapshot["candidate_artist_ids"])
+        if evaluation_snapshot is not None
+        else None
+    )
+    return candidate_ids, evaluation_snapshot
+
+
+@app.cell
+def _(find_similar_artists, pl):
+    def rank_tag_candidates(vectors, artist_id, *, representation, candidate_ids=None):
+        if candidate_ids is None:
+            return find_similar_artists(
+                vectors, artist_id, representation=representation, top_k=10
+            )
+        matches = find_similar_artists(
+            vectors,
+            artist_id,
+            representation=representation,
+            top_k=vectors.artists.height,
+        )
+        return matches.filter(pl.col("artist_id").is_in(list(candidate_ids))).head(10)
+
+    return (rank_tag_candidates,)
+
+
 @app.cell(hide_code=True)
 def _(artist_tags, mo, vectors):
     mo.md(f"""
@@ -58,16 +93,20 @@ def _(mo):
     mo.md(r"""
     ## Which artists look similar?
 
-    Select an artist to compare its top ten matches. Higher scores mean more similar artists.
+    Compare the top ten matches. When an evaluation snapshot exists, results
+    are limited to its frozen top 500 artists.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(mo, vectors):
-    _name_counts = vectors.artists.group_by("canonical_name").len(name="name_count")
+def _(candidate_ids, mo, pl, vectors):
+    _artists = vectors.artists
+    if candidate_ids is not None:
+        _artists = _artists.filter(pl.col("artist_id").is_in(candidate_ids))
+    _name_counts = _artists.group_by("canonical_name").len(name="name_count")
     _options = {}
-    for _row in vectors.artists.join(
+    for _row in _artists.join(
         _name_counts, on="canonical_name", how="left", validate="m:1"
     ).iter_rows(named=True):
         _label = _row["canonical_name"]
@@ -87,17 +126,25 @@ def _(mo, vectors):
 
 
 @app.cell(hide_code=True)
-def _(artist_selector, artist_tags, find_similar_artists, mo, pl, vectors):
+def _(
+    artist_selector, artist_tags, candidate_ids, rank_tag_candidates, mo, pl, vectors
+):
     _selected_id = artist_selector.value
     _row = artist_tags.filter(pl.col("artist_id") == _selected_id).row(0, named=True)
     _top_tags = sorted(_row["tags"], key=lambda tag: -tag["weight"])[:8]
     _tag_text = ", ".join(f"{tag['name']} ({tag['weight']})" for tag in _top_tags)
 
-    _binary = find_similar_artists(
-        vectors, _selected_id, representation="binary", top_k=10
+    _binary = rank_tag_candidates(
+        vectors,
+        _selected_id,
+        representation="binary",
+        candidate_ids=candidate_ids,
     )
-    _weighted = find_similar_artists(
-        vectors, _selected_id, representation="weighted", top_k=10
+    _weighted = rank_tag_candidates(
+        vectors,
+        _selected_id,
+        representation="weighted",
+        candidate_ids=candidate_ids,
     )
     _shared = len(set(_binary["artist_id"]) & set(_weighted["artist_id"]))
     _count = max(_binary.height, _weighted.height)
@@ -164,9 +211,10 @@ def _(mo):
 def _(
     artist_selector,
     artist_tags,
+    candidate_ids,
     clean_artist_tags,
     cleaned_vectors,
-    find_similar_artists,
+    rank_tag_candidates,
     mo,
     pl,
     representation_selector,
@@ -185,12 +233,18 @@ def _(
         return ", ".join(f"{tag['name']} ({tag['weight']})" for tag in tags) or "None"
 
     _representation = representation_selector.value
-    _raw = find_similar_artists(
-        vectors, _selected_id, representation=_representation, top_k=10
+    _raw = rank_tag_candidates(
+        vectors,
+        _selected_id,
+        representation=_representation,
+        candidate_ids=candidate_ids,
     )
     if _selected_id in cleaned_vectors.artists["artist_id"].to_list():
-        _cleaned = find_similar_artists(
-            cleaned_vectors, _selected_id, representation=_representation, top_k=10
+        _cleaned = rank_tag_candidates(
+            cleaned_vectors,
+            _selected_id,
+            representation=_representation,
+            candidate_ids=candidate_ids,
         )
     else:
         _cleaned = _raw.head(0)
@@ -241,14 +295,17 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(artist_selector, cleaned_vectors, find_similar_artists, mo, pl):
+def _(artist_selector, candidate_ids, cleaned_vectors, rank_tag_candidates, mo, pl):
     _selected_id = artist_selector.value
     if _selected_id not in cleaned_vectors.artists["artist_id"].to_list():
         _output = mo.md("This artist has no usable cleaned tags.")
     else:
         _rankings = {
-            _label: find_similar_artists(
-                cleaned_vectors, _selected_id, representation=_representation, top_k=10
+            _label: rank_tag_candidates(
+                cleaned_vectors,
+                _selected_id,
+                representation=_representation,
+                candidate_ids=candidate_ids,
             )
             for _label, _representation in (
                 ("Binary", "binary"),
@@ -280,10 +337,10 @@ def _(artist_selector, cleaned_vectors, find_similar_artists, mo, pl):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## How do text embeddings compare with tag similarity?
+    ## Does embedding artist tags improve similarity?
 
-    Compare TF-IDF with BGE-M3 embeddings of cleaned artist summaries.
-    Only artists with both representations are included.
+    Compare cleaned tag TF-IDF, BGE-M3 tag embeddings, and BGE-M3 summaries
+    over the same artists. Tag embeddings use tag names only, not weights.
     """)
     return
 
@@ -298,90 +355,6 @@ def _(paths, pl):
         else None
     )
     return find_similar_summary_artists, summary_embeddings
-
-
-@app.cell(hide_code=True)
-def _(
-    artist_selector,
-    artist_tags,
-    cleaned_vectors,
-    find_similar_artists,
-    find_similar_summary_artists,
-    mo,
-    pl,
-    summary_embeddings,
-):
-    if summary_embeddings is None:
-        _output = mo.md("Generate the artist summary embeddings to compare results.")
-    else:
-        _shared_ids = set(cleaned_vectors.artists["artist_id"]) & set(
-            summary_embeddings["artist_id"]
-        )
-        _selected_id = artist_selector.value
-        if _selected_id not in _shared_ids:
-            _output = mo.md("This artist does not have both tags and a summary.")
-        else:
-            _tfidf = (
-                find_similar_artists(
-                    cleaned_vectors,
-                    _selected_id,
-                    representation="tfidf",
-                    top_k=cleaned_vectors.artists.height,
-                )
-                .filter(pl.col("artist_id").is_in(list(_shared_ids)))
-                .head(10)
-            )
-            _semantic = find_similar_summary_artists(
-                summary_embeddings,
-                artist_tags,
-                _selected_id,
-                candidate_ids=_shared_ids,
-            )
-            _rows = []
-            for _index in range(max(_tfidf.height, _semantic.height)):
-                _tag_row = (
-                    _tfidf.row(_index, named=True)
-                    if _index < _tfidf.height
-                    else None
-                )
-                _text_row = (
-                    _semantic.row(_index, named=True)
-                    if _index < _semantic.height
-                    else None
-                )
-                _rows.append(
-                    {
-                        "Rank": _index + 1,
-                        "TF-IDF": _tag_row["canonical_name"] if _tag_row else "",
-                        "TF-IDF score": (
-                            round(_tag_row["similarity"], 3) if _tag_row else None
-                        ),
-                        "BGE-M3 summary": (
-                            _text_row["canonical_name"] if _text_row else ""
-                        ),
-                        "BGE-M3 score": (
-                            round(_text_row["similarity"], 3) if _text_row else None
-                        ),
-                    }
-                )
-            _output = (
-                mo.ui.table(pl.DataFrame(_rows), selection=None, page_size=len(_rows))
-                if _rows
-                else mo.md("No similar artists found.")
-            )
-    _output
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Does embedding artist tags improve similarity?
-
-    Compare cleaned tag TF-IDF, BGE-M3 tag embeddings, and BGE-M3 summaries
-    over the same artists. Tag embeddings use tag names only, not weights.
-    """)
-    return
 
 
 @app.cell
@@ -400,8 +373,9 @@ def _(paths, pl):
 def _(
     artist_selector,
     artist_tags,
+    candidate_ids,
     cleaned_vectors,
-    find_similar_artists,
+    rank_tag_candidates,
     find_similar_summary_artists,
     find_similar_tag_artists,
     mo,
@@ -417,19 +391,17 @@ def _(
             & set(summary_embeddings["artist_id"])
             & set(tag_embeddings["artist_id"])
         )
+        if candidate_ids is not None:
+            _shared_ids &= candidate_ids
         _selected_id = artist_selector.value
         if _selected_id not in _shared_ids:
             _output = mo.md("This artist does not have all three representations.")
         else:
-            _tfidf = (
-                find_similar_artists(
-                    cleaned_vectors,
-                    _selected_id,
-                    representation="tfidf",
-                    top_k=cleaned_vectors.artists.height,
-                )
-                .filter(pl.col("artist_id").is_in(list(_shared_ids)))
-                .head(10)
+            _tfidf = rank_tag_candidates(
+                cleaned_vectors,
+                _selected_id,
+                representation="tfidf",
+                candidate_ids=_shared_ids,
             )
             _tag_bge = find_similar_tag_artists(
                 tag_embeddings, artist_tags, _selected_id, candidate_ids=_shared_ids
@@ -461,6 +433,163 @@ def _(
                 if _rows
                 else mo.md("No similar artists found.")
             )
+    _output
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## How well do the rankings match known similar artists?
+
+    Compare both approaches within the fixed top-500 artist pool.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    artist_tags,
+    cleaned_vectors,
+    evaluation_snapshot,
+    rank_tag_candidates,
+    find_similar_tag_artists,
+    mo,
+    pl,
+    tag_embeddings,
+):
+    from sonora.similarity.evaluation import score_artist_similarity
+
+    reference_snapshot = None
+    reference_rankings = {"TF-IDF": {}, "BGE-M3 tags": {}}
+    reference_scores = None
+
+    if evaluation_snapshot is None:
+        _output = mo.md("Create the artist similarity evaluation snapshot first.")
+    elif tag_embeddings is None:
+        _output = mo.md("Generate BGE-M3 tag embeddings first.")
+    else:
+        reference_snapshot = evaluation_snapshot
+        _candidate_ids = set(reference_snapshot["candidate_artist_ids"])
+        _tag_ids = set(cleaned_vectors.artists["artist_id"])
+        _bge_ids = set(tag_embeddings["artist_id"])
+        for _reference in reference_snapshot["references"]:
+            _artist_id = _reference["artist_id"]
+            if _artist_id in _tag_ids:
+                _matches = rank_tag_candidates(
+                    cleaned_vectors,
+                    _artist_id,
+                    representation="tfidf",
+                    candidate_ids=_candidate_ids,
+                )
+                reference_rankings["TF-IDF"][_artist_id] = _matches[
+                    "artist_id"
+                ].to_list()
+            if _artist_id in _bge_ids:
+                _matches = find_similar_tag_artists(
+                    tag_embeddings,
+                    artist_tags,
+                    _artist_id,
+                    top_k=10,
+                    candidate_ids=_candidate_ids,
+                )
+                reference_rankings["BGE-M3 tags"][_artist_id] = _matches[
+                    "artist_id"
+                ].to_list()
+
+        reference_scores = score_artist_similarity(
+            reference_snapshot, reference_rankings
+        )
+        _totals = (
+            reference_scores.group_by("Approach")
+            .agg(
+                pl.col("Available").sum().alias("Artists evaluated"),
+                pl.col("Top 5").sum().alias("Matches in top 5"),
+                pl.col("Top 10").sum().alias("Matches in top 10"),
+            )
+            .sort("Approach")
+        )
+        _output = mo.ui.table(_totals, selection=None, page_size=2)
+
+    _output
+    return reference_rankings, reference_scores, reference_snapshot
+
+
+@app.cell(hide_code=True)
+def _(mo, reference_snapshot):
+    reference_selector = None
+    if reference_snapshot is not None:
+        _options = {
+            row["canonical_name"]: row["artist_id"]
+            for row in reference_snapshot["references"]
+        }
+        reference_selector = mo.ui.dropdown(
+            options=_options,
+            value=next(iter(_options)),
+            searchable=True,
+            label="Reference artist",
+            full_width=True,
+        )
+    reference_selector
+    return (reference_selector,)
+
+
+@app.cell(hide_code=True)
+def _(
+    artist_tags,
+    mo,
+    pl,
+    reference_rankings,
+    reference_scores,
+    reference_selector,
+    reference_snapshot,
+):
+    if reference_selector is None:
+        _output = None
+    else:
+        _artist_id = reference_selector.value
+        _reference = next(
+            row
+            for row in reference_snapshot["references"]
+            if row["artist_id"] == _artist_id
+        )
+        _expected = {match["artist_id"] for match in _reference["matches"]}
+        _names = dict(artist_tags.select("artist_id", "canonical_name").iter_rows())
+        _rows = []
+        for _rank in range(10):
+            _row = {"Rank": _rank + 1}
+            for _approach in ("TF-IDF", "BGE-M3 tags"):
+                _matches = reference_rankings[_approach].get(_artist_id, [])
+                _match_id = _matches[_rank] if _rank < len(_matches) else None
+                _name = _names[_match_id] if _match_id is not None else ""
+                _row[_approach] = (
+                    f"✓ {_name}" if _match_id in _expected else _name
+                )
+            _rows.append(_row)
+
+        _artist_scores = reference_scores.filter(
+            pl.col("Artist") == _reference["canonical_name"]
+        ).sort("Approach")
+        _counts = " | ".join(
+            (
+                f"{row['Approach']}: {row['Top 5']}/5 in top 5, "
+                f"{row['Top 10']}/5 in top 10"
+                if row["Available"]
+                else f"{row['Approach']}: unavailable"
+            )
+            for row in _artist_scores.iter_rows(named=True)
+        )
+        _reference_names = ", ".join(
+            match["canonical_name"] for match in _reference["matches"]
+        )
+        _output = mo.vstack(
+            [
+                mo.md(f"**Your five matches:** {_reference_names}"),
+                mo.md(_counts),
+                mo.ui.table(pl.DataFrame(_rows), selection=None, page_size=10),
+                mo.md("✓ = reference match. Rows 1–5 are the top five results."),
+            ]
+        )
     _output
     return
 
