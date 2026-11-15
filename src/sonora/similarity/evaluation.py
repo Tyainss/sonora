@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -174,7 +175,7 @@ def load_artist_similarity_evaluation(
 def score_artist_similarity(
     snapshot: dict, rankings: dict[str, dict[str, list[str]]]
 ) -> pl.DataFrame:
-    """Count known reference matches in each approach's top-five and top-ten."""
+    """Score reference recall and rank order within each approach's top ten."""
     pool = set(snapshot["candidate_artist_ids"])
     rows = []
     for approach, artist_rankings in rankings.items():
@@ -189,14 +190,26 @@ def score_artist_similarity(
                 )
             ):
                 raise ValueError(f"Invalid {approach} ranking for {artist_id}")
-            expected = {match["artist_id"] for match in reference["matches"]}
+            relevance = {
+                match["artist_id"]: len(reference["matches"]) - index
+                for index, match in enumerate(reference["matches"])
+            }
+            ideal_dcg = sum(
+                gain / math.log2(index + 2)
+                for index, gain in enumerate(range(len(relevance), 0, -1))
+            )
+            dcg = sum(
+                relevance.get(candidate, 0) / math.log2(index + 2)
+                for index, candidate in enumerate(ranked[:10])
+            )
             rows.append(
                 {
                     "Approach": approach,
                     "Artist": reference["canonical_name"],
                     "Available": artist_id in artist_rankings,
-                    "Top 5": len(expected.intersection(ranked[:5])),
-                    "Top 10": len(expected.intersection(ranked[:10])),
+                    "Top 5": len(set(relevance).intersection(ranked[:5])),
+                    "Top 10": len(set(relevance).intersection(ranked[:10])),
+                    "NDCG@10": dcg / ideal_dcg if artist_id in artist_rankings else None,
                 }
             )
     return pl.DataFrame(rows)

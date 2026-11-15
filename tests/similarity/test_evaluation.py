@@ -109,10 +109,15 @@ def test_scores_known_matches_and_missing_queries():
             "BGE-M3 tags": {},
         },
     )
-    assert scores.filter(pl.col("Approach") == "TF-IDF").row(0, named=True) == {
+    tfidf = scores.filter(pl.col("Approach") == "TF-IDF").row(0, named=True)
+    assert {key: value for key, value in tfidf.items() if key != "NDCG@10"} == {
         "Approach": "TF-IDF", "Artist": "Alpha", "Available": True,
         "Top 5": 4, "Top 10": 5,
     }
+    assert 0 < tfidf["NDCG@10"] < 1
+    assert scores.filter(pl.col("Approach") == "BGE-M3 tags").row(0, named=True)[
+        "NDCG@10"
+    ] is None
     assert scores.filter(pl.col("Approach") == "BGE-M3 tags").row(0, named=True)[
         "Top 5"
     ] == 0
@@ -120,3 +125,37 @@ def test_scores_known_matches_and_missing_queries():
         score_artist_similarity(snapshot, {"Invalid": {"a": ["g", "g"]}})
     with pytest.raises(ValueError, match="Invalid"):
         score_artist_similarity(snapshot, {"Invalid": {"a": ["x"]}})
+
+
+def test_ndcg_rewards_order_and_important_references():
+    snapshot = {
+        "candidate_artist_ids": ["a", "b", "c", "d", "e", "f", "g"],
+        "references": [
+            {
+                "artist_id": "a",
+                "canonical_name": "Alpha",
+                "matches": [
+                    {"artist_id": name} for name in ("b", "c", "d", "e", "f")
+                ],
+            }
+        ],
+    }
+    rankings = {
+        "Perfect": {"a": ["b", "c", "d", "e", "f", "g"]},
+        "Reversed": {"a": ["f", "e", "d", "c", "b", "g"]},
+        "Strong first": {"a": ["b", "g"]},
+        "Weak first": {"a": ["f", "g"]},
+        "No matches": {"a": ["g"]},
+        "Unavailable": {},
+    }
+    scores = {
+        row["Approach"]: row
+        for row in score_artist_similarity(snapshot, rankings).iter_rows(named=True)
+    }
+
+    assert scores["Perfect"]["NDCG@10"] == pytest.approx(1.0)
+    assert 0 < scores["Reversed"]["NDCG@10"] < 1
+    assert scores["Strong first"]["NDCG@10"] > scores["Weak first"]["NDCG@10"]
+    assert scores["No matches"]["NDCG@10"] == 0.0
+    assert scores["Unavailable"]["NDCG@10"] is None
+    assert scores["Perfect"]["Top 5"] == scores["Reversed"]["Top 5"] == 5
