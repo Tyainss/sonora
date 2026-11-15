@@ -14,6 +14,7 @@ def _catalogue(paths, rows):
     pl.DataFrame(
         rows,
         schema={"artist_id": pl.String, "canonical_name": pl.String},
+        orient="row",
     ).write_parquet(paths.curated_artists)
 
 

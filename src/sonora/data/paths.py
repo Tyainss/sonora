@@ -69,6 +69,16 @@ class DataPaths:
         return self.curated_dir / "listening_events.parquet"
 
     @property
+    def artist_summary_embeddings(self) -> Path:
+        return (
+            self.data_dir / "processed" / "similarity" / "artist_summary_embeddings.parquet"
+        )
+
+    @property
+    def artist_summary_embeddings_metadata(self) -> Path:
+        return self.artist_summary_embeddings.with_suffix(".json")
+
+    @property
     def breakout_dir(self) -> Path:
         return self.data_dir / "processed" / "breakout"
 

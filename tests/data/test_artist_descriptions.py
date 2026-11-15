@@ -12,7 +12,7 @@ from sonora.data.paths import DataPaths
 def _catalogue(paths, rows):
     paths.curated_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(
-        rows, schema={"artist_id": pl.String, "canonical_name": pl.String}
+        rows, schema={"artist_id": pl.String, "canonical_name": pl.String}, orient="row"
     ).write_parquet(paths.curated_artists)
 
 
