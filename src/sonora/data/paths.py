@@ -87,6 +87,16 @@ class DataPaths:
         return self.artist_tag_embeddings.with_suffix(".json")
 
     @property
+    def artist_similarity_references(self) -> Path:
+        return self.data_dir / "evaluation" / "artist_similarity_references.json"
+
+    @property
+    def artist_similarity_evaluation(self) -> Path:
+        return (
+            self.data_dir / "processed" / "similarity" / "artist_similarity_evaluation.json"
+        )
+
+    @property
     def breakout_dir(self) -> Path:
         return self.data_dir / "processed" / "breakout"
 

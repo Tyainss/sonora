@@ -52,6 +52,12 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     assert paths.artist_tag_embeddings_metadata == (
         tmp_path / "sonora-data/processed/similarity/artist_tag_embeddings.json"
     )
+    assert paths.artist_similarity_references == (
+        tmp_path / "sonora-data/evaluation/artist_similarity_references.json"
+    )
+    assert paths.artist_similarity_evaluation == (
+        tmp_path / "sonora-data/processed/similarity/artist_similarity_evaluation.json"
+    )
     assert paths.breakout_dir == tmp_path / "sonora-data/processed/breakout"
     assert paths.breakout_events == paths.breakout_dir / "first_breakout_events.parquet"
     assert paths.daily_breakout_targets == paths.breakout_dir / "daily_targets.parquet"
