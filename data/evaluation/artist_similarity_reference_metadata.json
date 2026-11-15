@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "purpose": "Ranked reference examples for evaluating artist similarity, not exhaustive ground truth.",
+  "candidate_pool": "Frozen top 500 most-listened artists in data/processed/similarity/artist_similarity_evaluation.json.",
+  "ranking": "Five ordered matches per reference artist, with rank 1 representing the strongest perceived musical similarity. Related solo projects and groups are eligible.",
+  "reference_sets": {
+    "listener": {
+      "label": "Listener",
+      "file": "artist_similarity_references.json",
+      "source": "Personal listening experience and musical judgment",
+      "recorded_on": "2026-11-15",
+      "notes": "Selected and ordered by the listener. Subjective, revisable, and not an exhaustive list of relevant matches."
+    },
+    "llm": {
+      "label": "Independent LLM",
+      "file": "artist_similarity_llm_references.csv",
+      "source": "LLM-generated ranked judgments supplied by the listener",
+      "received_on": "2026-11-15",
+      "model": "ChatGPT-6.1 Sol",
+      "generated_at": "2026-11-15",
+      "prompt_file": "artist_similarity_llm_prompt.md",
+      "notes": "Includes a brief justification per match. Model identity, research sources, and compliance with the independence instructions were not supplied or independently verified; judgments remain subjective and revisable."
+    }
+  }
+}
