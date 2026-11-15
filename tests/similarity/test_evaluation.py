@@ -1,3 +1,4 @@
+import csv
 import json
 
 import polars as pl
@@ -7,6 +8,7 @@ from sonora.data.paths import DataPaths
 from sonora.similarity.evaluation import (
     build_artist_similarity_evaluation,
     load_artist_similarity_evaluation,
+    load_artist_similarity_reference_sets,
     score_artist_similarity,
 )
 
@@ -159,3 +161,114 @@ def test_ndcg_rewards_order_and_important_references():
     assert scores["No matches"]["NDCG@10"] == 0.0
     assert scores["Unavailable"]["NDCG@10"] is None
     assert scores["Perfect"]["Top 5"] == scores["Reversed"]["Top 5"] == 5
+
+
+def _independent_references(paths, *, matches=None):
+    metadata = {
+        "schema_version": 1,
+        "reference_sets": {
+            "listener": {
+                "label": "Listener",
+                "file": paths.artist_similarity_references.name,
+            },
+            "llm": {
+                "label": "Independent LLM",
+                "file": paths.artist_similarity_llm_references.name,
+            },
+        },
+    }
+    paths.artist_similarity_reference_metadata.write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    columns = [
+        "reference_artist",
+        "reference_artist_id",
+        "rank",
+        "similar_artist",
+        "similar_artist_id",
+        "why_similar",
+    ]
+    with paths.artist_similarity_llm_references.open(
+        "w", encoding="utf-8", newline=""
+    ) as output:
+        writer = csv.DictWriter(output, fieldnames=columns)
+        writer.writeheader()
+        for rank, i in enumerate(matches or (5, 4, 3, 2, 1), start=1):
+            writer.writerow(
+                {
+                    "reference_artist": "Artist 0",
+                    "reference_artist_id": "id-000",
+                    "rank": rank,
+                    "similar_artist": f"Artist {i}",
+                    "similar_artist_id": f"id-{i:03d}",
+                    "why_similar": f"Reason {i}",
+                }
+            )
+
+
+def test_loads_separate_references_over_the_same_pool(tmp_path):
+    paths = DataPaths(data_dir=tmp_path / "data")
+    _inputs(paths)
+    build_artist_similarity_evaluation(paths=paths)
+    _independent_references(paths)
+    sets = load_artist_similarity_reference_sets(paths=paths)
+    assert list(sets) == ["Listener", "Independent LLM"]
+    human, llm = sets.values()
+    assert llm["candidate_artist_ids"] == human["candidate_artist_ids"]
+    assert [r["artist_id"] for r in llm["references"][0]["matches"]] == [
+        "id-005", "id-004", "id-003", "id-002", "id-001"
+    ]
+    assert llm["references"][0]["matches"][0]["why_similar"] == "Reason 5"
+    assert human["references"][0]["matches"][0]["artist_id"] == "id-001"
+
+    rankings = {"TF-IDF": {"id-000": [f"id-{i:03d}" for i in range(1, 6)]}}
+    listener_score = score_artist_similarity(human, rankings)["NDCG@10"][0]
+    llm_score = score_artist_similarity(llm, rankings)["NDCG@10"][0]
+    assert listener_score == pytest.approx(1.0)
+    assert llm_score < listener_score
+
+
+@pytest.mark.parametrize(
+    "bad_matches",
+    [
+        (1, 2, 3, 4, 500),  # Outside the frozen pool.
+        (1, 2, 3, 4, 4),  # Duplicate artist.
+        (0, 1, 2, 3, 4),  # Self-match.
+    ],
+)
+def test_rejects_invalid_llm_references(tmp_path, bad_matches):
+    paths = DataPaths(data_dir=tmp_path / "data")
+    _inputs(paths)
+    build_artist_similarity_evaluation(paths=paths)
+    _independent_references(paths, matches=bad_matches)
+    with pytest.raises(ValueError, match="Invalid"):
+        load_artist_similarity_reference_sets(paths=paths)
+
+
+def test_rejects_missing_llm_ranks_and_wrong_names(tmp_path):
+    paths = DataPaths(data_dir=tmp_path / "data")
+    _inputs(paths)
+    build_artist_similarity_evaluation(paths=paths)
+    _independent_references(paths)
+    with paths.artist_similarity_llm_references.open(encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    rows[4]["rank"] = "4"
+    with paths.artist_similarity_llm_references.open(
+        "w", encoding="utf-8", newline=""
+    ) as f:
+        writer = csv.DictWriter(f, fieldnames=rows[0])
+        writer.writeheader()
+        writer.writerows(rows)
+    with pytest.raises(ValueError, match="rank"):
+        load_artist_similarity_reference_sets(paths=paths)
+
+    rows[4]["rank"] = "5"
+    rows[0]["similar_artist"] = "Wrong name"
+    with paths.artist_similarity_llm_references.open(
+        "w", encoding="utf-8", newline=""
+    ) as f:
+        writer = csv.DictWriter(f, fieldnames=rows[0])
+        writer.writeheader()
+        writer.writerows(rows)
+    with pytest.raises(ValueError, match="Invalid"):
+        load_artist_similarity_reference_sets(paths=paths)

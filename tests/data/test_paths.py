@@ -55,6 +55,12 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     assert paths.artist_similarity_references == (
         tmp_path / "sonora-data/evaluation/artist_similarity_references.json"
     )
+    assert paths.artist_similarity_llm_references == (
+        tmp_path / "sonora-data/evaluation/artist_similarity_llm_references.csv"
+    )
+    assert paths.artist_similarity_reference_metadata == (
+        tmp_path / "sonora-data/evaluation/artist_similarity_reference_metadata.json"
+    )
     assert paths.artist_similarity_evaluation == (
         tmp_path / "sonora-data/processed/similarity/artist_similarity_evaluation.json"
     )

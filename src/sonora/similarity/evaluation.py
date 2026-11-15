@@ -1,4 +1,5 @@
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -170,6 +171,104 @@ def load_artist_similarity_evaluation(
     ):
         raise ValueError("Reference artists must belong to the frozen candidate pool")
     return snapshot
+
+
+
+def load_artist_similarity_reference_sets(
+    *, paths: DataPaths = DEFAULT_DATA_PATHS
+) -> dict[str, dict]:
+    """Load listener and independent LLM references for the same frozen pool."""
+    snapshot = load_artist_similarity_evaluation(paths=paths)
+    metadata = json.loads(
+        paths.artist_similarity_reference_metadata.read_text(encoding="utf-8")
+    )
+    if metadata.get("schema_version") != 1:
+        raise ValueError("Unsupported artist similarity reference metadata")
+    source_metadata = metadata["reference_sets"]
+    if (
+        source_metadata["listener"]["file"] != paths.artist_similarity_references.name
+        or source_metadata["llm"]["file"] != paths.artist_similarity_llm_references.name
+    ):
+        raise ValueError(
+            "Artist similarity reference metadata has incorrect source paths"
+        )
+
+    pool = set(snapshot["candidate_artist_ids"])
+    canonical_names = dict(
+        pl.read_parquet(paths.curated_artists)
+        .select("artist_id", "canonical_name")
+        .iter_rows()
+    )
+    reference_ids = {item["artist_id"] for item in snapshot["references"]}
+    required_columns = (
+        "reference_artist",
+        "reference_artist_id",
+        "rank",
+        "similar_artist",
+        "similar_artist_id",
+        "why_similar",
+    )
+    by_artist: dict[str, dict[int, dict]] = {}
+    with paths.artist_similarity_llm_references.open(
+        encoding="utf-8-sig", newline=""
+    ) as source:
+        reader = csv.DictReader(source)
+        if tuple(reader.fieldnames or ()) != required_columns:
+            raise ValueError("Invalid LLM artist similarity reference columns")
+        for row in reader:
+            reference_id = row["reference_artist_id"]
+            match_id = row["similar_artist_id"]
+            if (
+                reference_id not in reference_ids
+                or match_id not in pool
+                or reference_id == match_id
+                or canonical_names.get(reference_id) != row["reference_artist"]
+                or canonical_names.get(match_id) != row["similar_artist"]
+                or not row["why_similar"]
+            ):
+                raise ValueError(f"Invalid LLM reference: {row}")
+            try:
+                rank = int(row["rank"])
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"Invalid LLM reference rank: {row}") from exc
+            matches = by_artist.setdefault(reference_id, {})
+            if rank not in range(1, 6) or rank in matches:
+                raise ValueError(f"Invalid or duplicate LLM rank for {reference_id}")
+            matches[rank] = {
+                "artist_id": match_id,
+                "canonical_name": row["similar_artist"],
+                "why_similar": row["why_similar"],
+            }
+
+    if set(by_artist) != reference_ids:
+        raise ValueError("LLM and listener reference artists must match")
+    llm_references = []
+    for reference in snapshot["references"]:
+        ranked = by_artist[reference["artist_id"]]
+        if set(ranked) != set(range(1, 6)) or len(
+            {match["artist_id"] for match in ranked.values()}
+        ) != 5:
+            raise ValueError(f"Invalid LLM matches for {reference['canonical_name']}")
+        llm_references.append(
+            {
+                "artist_id": reference["artist_id"],
+                "canonical_name": reference["canonical_name"],
+                "matches": [ranked[rank] for rank in range(1, 6)],
+            }
+        )
+
+    return {
+        source_metadata["listener"]["label"]: {
+            **snapshot,
+            "reference_metadata": source_metadata["listener"],
+        },
+        source_metadata["llm"]["label"]: {
+            **snapshot,
+            "references_sha256": _sha256(paths.artist_similarity_llm_references),
+            "references": llm_references,
+            "reference_metadata": source_metadata["llm"],
+        },
+    }
 
 
 def score_artist_similarity(

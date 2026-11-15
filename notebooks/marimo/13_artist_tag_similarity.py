@@ -442,7 +442,8 @@ def _(mo):
     mo.md(r"""
     ## How well do the rankings match known similar artists?
 
-    Compare both approaches within the fixed top-500 artist pool.
+    Compare the same top-500 rankings against listener and independent LLM
+    references. Recall counts known matches; NDCG@10 also rewards their order.
     """)
     return
 
@@ -455,12 +456,16 @@ def _(
     rank_tag_candidates,
     find_similar_tag_artists,
     mo,
+    paths,
     pl,
     tag_embeddings,
 ):
-    from sonora.similarity.evaluation import score_artist_similarity
+    from sonora.similarity.evaluation import (
+        load_artist_similarity_reference_sets,
+        score_artist_similarity,
+    )
 
-    reference_snapshot = None
+    reference_sets = None
     reference_rankings = {"TF-IDF": {}, "BGE-M3 tags": {}}
     reference_scores = None
 
@@ -469,11 +474,11 @@ def _(
     elif tag_embeddings is None:
         _output = mo.md("Generate BGE-M3 tag embeddings first.")
     else:
-        reference_snapshot = evaluation_snapshot
-        _candidate_ids = set(reference_snapshot["candidate_artist_ids"])
+        reference_sets = load_artist_similarity_reference_sets(paths=paths)
+        _candidate_ids = set(evaluation_snapshot["candidate_artist_ids"])
         _tag_ids = set(cleaned_vectors.artists["artist_id"])
         _bge_ids = set(tag_embeddings["artist_id"])
-        for _reference in reference_snapshot["references"]:
+        for _reference in evaluation_snapshot["references"]:
             _artist_id = _reference["artist_id"]
             if _artist_id in _tag_ids:
                 _matches = rank_tag_candidates(
@@ -497,31 +502,55 @@ def _(
                     "artist_id"
                 ].to_list()
 
-        reference_scores = score_artist_similarity(
-            reference_snapshot, reference_rankings
+        reference_scores = pl.concat(
+            [
+                score_artist_similarity(_snapshot, reference_rankings).with_columns(
+                    pl.lit(_label).alias("Reference set")
+                )
+                for _label, _snapshot in reference_sets.items()
+            ]
         )
         _totals = (
-            reference_scores.group_by("Approach")
+            reference_scores.group_by("Reference set", "Approach")
             .agg(
                 pl.col("Available").sum().alias("Artists evaluated"),
-                pl.col("Top 5").sum().alias("Matches in top 5"),
-                pl.col("Top 10").sum().alias("Matches in top 10"),
+                (pl.col("Top 5").filter(pl.col("Available")).mean() / 5)
+                .round(3)
+                .alias("Recall@5"),
+                (pl.col("Top 10").filter(pl.col("Available")).mean() / 5)
+                .round(3)
+                .alias("Recall@10"),
+                pl.col("NDCG@10").mean().round(3).alias("NDCG@10"),
             )
-            .sort("Approach")
+            .sort("Reference set", "Approach")
         )
-        _output = mo.ui.table(_totals, selection=None, page_size=2)
+        _output = mo.ui.table(_totals, selection=None, page_size=4)
 
     _output
-    return reference_rankings, reference_scores, reference_snapshot
+    return reference_rankings, reference_scores, reference_sets
 
 
 @app.cell(hide_code=True)
-def _(mo, reference_snapshot):
+def _(mo, reference_sets):
+    reference_set_selector = None
+    if reference_sets is not None:
+        reference_set_selector = mo.ui.dropdown(
+            options=list(reference_sets),
+            value=next(iter(reference_sets)),
+            label="Reference set",
+        )
+    reference_set_selector
+    return (reference_set_selector,)
+
+
+@app.cell(hide_code=True)
+def _(mo, reference_set_selector, reference_sets):
     reference_selector = None
-    if reference_snapshot is not None:
+    if reference_set_selector is not None:
+        _snapshot = reference_sets[reference_set_selector.value]
         _options = {
             row["canonical_name"]: row["artist_id"]
-            for row in reference_snapshot["references"]
+            for row in _snapshot["references"]
         }
         reference_selector = mo.ui.dropdown(
             options=_options,
@@ -542,15 +571,18 @@ def _(
     reference_rankings,
     reference_scores,
     reference_selector,
-    reference_snapshot,
+    reference_set_selector,
+    reference_sets,
 ):
     if reference_selector is None:
         _output = None
     else:
+        _set_label = reference_set_selector.value
+        _snapshot = reference_sets[_set_label]
         _artist_id = reference_selector.value
         _reference = next(
             row
-            for row in reference_snapshot["references"]
+            for row in _snapshot["references"]
             if row["artist_id"] == _artist_id
         )
         _expected = {match["artist_id"] for match in _reference["matches"]}
@@ -568,23 +600,26 @@ def _(
             _rows.append(_row)
 
         _artist_scores = reference_scores.filter(
-            pl.col("Artist") == _reference["canonical_name"]
+            (pl.col("Reference set") == _set_label)
+            & (pl.col("Artist") == _reference["canonical_name"])
         ).sort("Approach")
         _counts = " | ".join(
             (
                 f"{row['Approach']}: {row['Top 5']}/5 in top 5, "
-                f"{row['Top 10']}/5 in top 10"
+                f"{row['Top 10']}/5 in top 10, "
+                f"NDCG@10 {row['NDCG@10']:.3f}"
                 if row["Available"]
                 else f"{row['Approach']}: unavailable"
             )
             for row in _artist_scores.iter_rows(named=True)
         )
         _reference_names = ", ".join(
-            match["canonical_name"] for match in _reference["matches"]
+            f"{rank}. {match['canonical_name']}"
+            for rank, match in enumerate(_reference["matches"], start=1)
         )
         _output = mo.vstack(
             [
-                mo.md(f"**Your five matches:** {_reference_names}"),
+                mo.md(f"**Reference matches:** {_reference_names}"),
                 mo.md(_counts),
                 mo.ui.table(pl.DataFrame(_rows), selection=None, page_size=10),
                 mo.md("✓ = reference match. Rows 1–5 are the top five results."),
