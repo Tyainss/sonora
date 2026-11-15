@@ -22,9 +22,9 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Can BGE-M3 process Sonora's artist descriptions?
+    # How fast is BGE-M3 on Sonora's artist descriptions?
 
-    Check input lengths and inference time for cleaned summaries and biographies.
+    Compare inference speed with different batch sizes.
     """)
     return
 
@@ -61,7 +61,7 @@ def _(mo):
     mo.md(r"""
     ## Which descriptions should we test?
 
-    A fixed sample of short, medium and longer biographies.
+    Eight artists from each biography length group.
     """)
     return
 
@@ -74,7 +74,7 @@ def _(descriptions, pl):
         descriptions.filter((pl.col("words") >= 500) & (pl.col("words") <= 1200)),
     )
     pilot = pl.concat(
-        [group.sample(n=min(4, group.height), seed=42) for group in _groups]
+        [group.sample(n=min(8, group.height), seed=42) for group in _groups]
     ).sort("artist_id")
     if pilot.is_empty():
         raise ValueError("No artist descriptions available for the pilot")
@@ -121,28 +121,42 @@ def _(descriptions, mo, np, perf_counter, pilot, pl, run_pilot):
         raise ValueError("The pilot contains biographies longer than the model limit")
 
     _model.encode(
-        _pilot_summaries[:1],
+        _pilot_biographies[:1],
         batch_size=1,
         normalize_embeddings=True,
         show_progress_bar=False,
     )
-    _times = {}
+    _rows = []
     for _label, _texts in (
         ("Summaries", _pilot_summaries),
         ("Full biographies", _pilot_biographies),
     ):
-        _start = perf_counter()
-        _embeddings = _model.encode(
-            _texts,
-            batch_size=1,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
-        _times[_label] = perf_counter() - _start
-        if _embeddings.shape != (len(_texts), 1024) or not np.isfinite(
-            _embeddings
-        ).all():
-            raise ValueError("Unexpected BGE-M3 embeddings")
+        _baseline_seconds = None
+        for _batch_size in (1, 8, 16):
+            _start = perf_counter()
+            _embeddings = _model.encode(
+                _texts,
+                batch_size=_batch_size,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            _seconds = perf_counter() - _start
+            if _embeddings.shape != (len(_texts), 1024) or not np.isfinite(
+                _embeddings
+            ).all():
+                raise ValueError("Unexpected BGE-M3 embeddings")
+            if _baseline_seconds is None:
+                _baseline_seconds = _seconds
+            _rows.append(
+                {
+                    "Input": _label,
+                    "Batch size": _batch_size,
+                    "Artists": len(_texts),
+                    "Seconds": round(_seconds, 1),
+                    "Seconds/artist": round(_seconds / len(_texts), 2),
+                    "Speedup vs batch 1": round(_baseline_seconds / _seconds, 2),
+                }
+            )
 
     _limit_count = sum(length > _max_tokens for length in _all_lengths)
     _sample_lengths = pl.DataFrame(
@@ -152,20 +166,7 @@ def _(descriptions, mo, np, perf_counter, pilot, pl, run_pilot):
             "Biography tokens": _pilot_bio_lengths,
         }
     ).sort("Biography tokens")
-    _timings = pl.DataFrame(
-        {
-            "Input": ["Summaries", "Full biographies"],
-            "Artists": [pilot.height, pilot.height],
-            "Seconds": [
-                round(_times["Summaries"], 1),
-                round(_times["Full biographies"], 1),
-            ],
-            "Seconds/artist": [
-                round(_times["Summaries"] / pilot.height, 2),
-                round(_times["Full biographies"] / pilot.height, 2),
-            ],
-        }
-    )
+    _timings = pl.DataFrame(_rows)
     mo.vstack(
         [
             mo.md(
@@ -176,7 +177,7 @@ def _(descriptions, mo, np, perf_counter, pilot, pl, run_pilot):
                 f"**{_limit_count:,} of {descriptions.height:,} biographies** "
                 "exceed the model's input limit."
             ),
-            mo.ui.table(_timings, selection=None, page_size=2),
+            mo.ui.table(_timings, selection=None, page_size=6),
             mo.ui.table(_sample_lengths, selection=None, page_size=pilot.height),
         ]
     )
