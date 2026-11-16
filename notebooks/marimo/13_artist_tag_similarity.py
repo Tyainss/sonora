@@ -63,10 +63,12 @@ def _(paths):
 
 @app.cell
 def _(find_similar_artists, pl):
-    def rank_tag_candidates(vectors, artist_id, *, representation, candidate_ids=None):
+    def rank_tag_candidates(
+        vectors, artist_id, *, representation, candidate_ids=None, top_k=10
+    ):
         if candidate_ids is None:
             return find_similar_artists(
-                vectors, artist_id, representation=representation, top_k=10
+                vectors, artist_id, representation=representation, top_k=top_k
             )
         matches = find_similar_artists(
             vectors,
@@ -74,7 +76,7 @@ def _(find_similar_artists, pl):
             representation=representation,
             top_k=vectors.artists.height,
         )
-        return matches.filter(pl.col("artist_id").is_in(list(candidate_ids))).head(10)
+        return matches.filter(pl.col("artist_id").is_in(list(candidate_ids))).head(top_k)
 
     return (rank_tag_candidates,)
 
@@ -455,8 +457,9 @@ def _(mo):
     mo.md(r"""
     ## How well do the rankings match known similar artists?
 
-    Compare the same top-500 rankings against listener and independent LLM
-    references. Recall counts known matches; NDCG@10 also rewards their order.
+    Compare TF-IDF, BGE-M3 tags, and their equal-weight RRF (k=60) against
+    listener and independent LLM references. Fusion uses full rankings within
+    the frozen top 500; only the final results are limited to ten artists.
     """)
     return
 
@@ -477,9 +480,10 @@ def _(
         load_artist_similarity_reference_sets,
         score_artist_similarity,
     )
+    from sonora.similarity.fusion import reciprocal_rank_fusion
 
     reference_sets = None
-    reference_rankings = {"TF-IDF": {}, "BGE-M3 tags": {}}
+    reference_rankings = {"TF-IDF": {}, "BGE-M3 tags": {}, "RRF": {}}
     reference_scores = None
 
     if evaluation_snapshot is None:
@@ -493,27 +497,32 @@ def _(
         _bge_ids = set(tag_embeddings["artist_id"])
         for _reference in evaluation_snapshot["references"]:
             _artist_id = _reference["artist_id"]
+            _full_rankings = {}
             if _artist_id in _tag_ids:
                 _matches = rank_tag_candidates(
                     cleaned_vectors,
                     _artist_id,
                     representation="tfidf",
                     candidate_ids=_candidate_ids,
+                    top_k=len(_candidate_ids),
                 )
-                reference_rankings["TF-IDF"][_artist_id] = _matches[
-                    "artist_id"
-                ].to_list()
+                _full_rankings["TF-IDF"] = _matches["artist_id"].to_list()
             if _artist_id in _bge_ids:
                 _matches = find_similar_tag_artists(
                     tag_embeddings,
                     artist_tags,
                     _artist_id,
-                    top_k=10,
+                    top_k=len(_candidate_ids),
                     candidate_ids=_candidate_ids,
                 )
-                reference_rankings["BGE-M3 tags"][_artist_id] = _matches[
-                    "artist_id"
-                ].to_list()
+                _full_rankings["BGE-M3 tags"] = _matches["artist_id"].to_list()
+
+            for _approach, _ranking in _full_rankings.items():
+                reference_rankings[_approach][_artist_id] = _ranking[:10]
+            if len(_full_rankings) == 2:
+                reference_rankings["RRF"][_artist_id] = reciprocal_rank_fusion(
+                    list(_full_rankings.values()), top_k=10
+                )
 
         reference_scores = pl.concat(
             [
@@ -537,7 +546,7 @@ def _(
             )
             .sort("Reference set", "Approach")
         )
-        _output = mo.ui.table(_totals, selection=None, page_size=4)
+        _output = mo.ui.table(_totals, selection=None, page_size=6)
 
     _output
     return reference_rankings, reference_scores, reference_sets
@@ -548,9 +557,10 @@ def _(mo):
     mo.md(r"""
     ### Which approach works better across artists?
 
-    Each approach shows **top 5 / top 10 / NDCG@10**. The counts are matches
-    out of five references. The NDCG difference is BGE-M3 minus TF-IDF;
-    positive values favour BGE-M3. The largest differences appear first.
+    Each approach shows **top 5 / top 10 / NDCG@10**. Counts are matches
+    out of five references. RRF gain compares fusion with the better of TF-IDF
+    and BGE-M3, using NDCG@10. Positive means fusion performs better.
+    The largest changes appear first.
     """)
     return
 
@@ -575,39 +585,50 @@ def _(mo, pl, reference_scores):
                     f"{score['NDCG@10']:.3f}"
                 )
 
+            _labels = ("TF-IDF", "BGE-M3 tags", "RRF")
             _rows = []
-            _wins = {"TF-IDF": 0, "BGE-M3 tags": 0, "Tie": 0}
+            _wins = {**dict.fromkeys(_labels, 0), "Tie": 0}
             for _artist, _approaches in _by_artist.items():
-                _tfidf = _approaches.get("TF-IDF")
-                _bge = _approaches.get("BGE-M3 tags")
-
-                _difference = None
+                _scores_by_approach = {
+                    _label: _approaches.get(_label) for _label in _labels
+                }
+                _gain = None
                 _winner = "Unavailable"
-                if _tfidf and _bge and _tfidf["Available"] and _bge["Available"]:
-                    _difference = round(_bge["NDCG@10"] - _tfidf["NDCG@10"], 3)
-                    _winner = (
-                        "BGE-M3 tags"
-                        if _difference > 0
-                        else "TF-IDF"
-                        if _difference < 0
-                        else "Tie"
-                    )
+                if all(
+                    _score is not None and _score["Available"]
+                    for _score in _scores_by_approach.values()
+                ):
+                    _ndcg = {
+                        _label: round(_score["NDCG@10"], 3)
+                        for _label, _score in _scores_by_approach.items()
+                    }
+                    _best = max(_ndcg.values())
+                    _leaders = [
+                        _label for _label, _value in _ndcg.items() if _value == _best
+                    ]
+                    _winner = _leaders[0] if len(_leaders) == 1 else "Tie"
                     _wins[_winner] += 1
+                    _gain = round(
+                        _ndcg["RRF"] - max(_ndcg["TF-IDF"], _ndcg["BGE-M3 tags"]),
+                        3,
+                    )
 
                 _rows.append(
                     {
                         "Artist": _artist,
-                        "TF-IDF": _metrics(_tfidf),
-                        "BGE-M3 tags": _metrics(_bge),
-                        "Better NDCG": _winner,
-                        "NDCG difference": _difference,
+                        **{
+                            _label: _metrics(_scores_by_approach[_label])
+                            for _label in _labels
+                        },
+                        "Best NDCG": _winner,
+                        "RRF gain": _gain,
                     }
                 )
 
             _rows.sort(
                 key=lambda row: (
-                    row["NDCG difference"] is None,
-                    -abs(row["NDCG difference"] or 0),
+                    row["RRF gain"] is None,
+                    -abs(row["RRF gain"] or 0),
                     row["Artist"],
                 )
             )
@@ -615,9 +636,9 @@ def _(mo, pl, reference_scores):
             _sections.extend(
                 [
                     mo.md(
-                        f"**{_set}** - NDCG@10 wins: BGE-M3 {_wins['BGE-M3 tags']}, "
-                        f"TF-IDF {_wins['TF-IDF']}, ties {_wins['Tie']} "
-                        f"({_compared} artists compared)."
+                        f"**{_set}** - NDCG@10 wins: RRF {_wins['RRF']}, "
+                        f"BGE-M3 {_wins['BGE-M3 tags']}, TF-IDF {_wins['TF-IDF']}, "
+                        f"ties {_wins['Tie']} ({_compared} artists compared)."
                     ),
                     mo.ui.table(
                         pl.DataFrame(_rows), selection=None, page_size=len(_rows)
@@ -689,7 +710,7 @@ def _(
         _rows = []
         for _rank in range(10):
             _row = {"Rank": _rank + 1}
-            for _approach in ("TF-IDF", "BGE-M3 tags"):
+            for _approach in ("TF-IDF", "BGE-M3 tags", "RRF"):
                 _matches = reference_rankings[_approach].get(_artist_id, [])
                 _match_id = _matches[_rank] if _rank < len(_matches) else None
                 _name = _names[_match_id] if _match_id is not None else ""
