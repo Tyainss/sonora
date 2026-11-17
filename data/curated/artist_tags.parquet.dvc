@@ -1,0 +1,5 @@
+outs:
+- md5: 438338acd16660840918a84dab290184
+  size: 257002
+  hash: md5
+  path: artist_tags.parquet

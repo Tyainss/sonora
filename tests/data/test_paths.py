@@ -11,6 +11,12 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     assert paths.raw_lastfm_integrity == (
         tmp_path / "sonora-data/raw/lastfm/scrobbles.integrity.json"
     )
+    assert paths.raw_lastfm_artist_tags_dir == (
+        tmp_path / "sonora-data/raw/lastfm/artist_tags"
+    )
+    assert paths.raw_lastfm_artist_descriptions_dir == (
+        tmp_path / "sonora-data/raw/lastfm/artist_descriptions"
+    )
     assert paths.interim_dir == tmp_path / "sonora-data/interim"
     assert paths.listening_events_clean == (
         tmp_path / "sonora-data/interim/listening_events_clean.parquet"
@@ -18,6 +24,12 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     assert paths.curated_dir == tmp_path / "sonora-data/curated"
 
     assert paths.curated_artists == (tmp_path / "sonora-data/curated/artists.parquet")
+    assert paths.curated_artist_tags == (
+        tmp_path / "sonora-data/curated/artist_tags.parquet"
+    )
+    assert paths.curated_artist_descriptions == (
+        tmp_path / "sonora-data/curated/artist_descriptions.parquet"
+    )
     assert paths.curated_artist_aliases == (
         tmp_path / "sonora-data/curated/artist_aliases.parquet"
     )
@@ -27,6 +39,30 @@ def test_data_paths_are_derived_from_one_data_root(tmp_path):
     )
     assert paths.curated_listening_events == (
         tmp_path / "sonora-data/curated/listening_events.parquet"
+    )
+    assert paths.artist_summary_embeddings == (
+        tmp_path / "sonora-data/processed/similarity/artist_summary_embeddings.parquet"
+    )
+    assert paths.artist_summary_embeddings_metadata == (
+        tmp_path / "sonora-data/processed/similarity/artist_summary_embeddings.json"
+    )
+    assert paths.artist_tag_embeddings == (
+        tmp_path / "sonora-data/processed/similarity/artist_tag_embeddings.parquet"
+    )
+    assert paths.artist_tag_embeddings_metadata == (
+        tmp_path / "sonora-data/processed/similarity/artist_tag_embeddings.json"
+    )
+    assert paths.artist_similarity_references == (
+        tmp_path / "sonora-data/evaluation/artist_similarity_references.json"
+    )
+    assert paths.artist_similarity_llm_references == (
+        tmp_path / "sonora-data/evaluation/artist_similarity_llm_references.csv"
+    )
+    assert paths.artist_similarity_reference_metadata == (
+        tmp_path / "sonora-data/evaluation/artist_similarity_reference_metadata.json"
+    )
+    assert paths.artist_similarity_evaluation == (
+        tmp_path / "sonora-data/processed/similarity/artist_similarity_evaluation.json"
     )
     assert paths.breakout_dir == tmp_path / "sonora-data/processed/breakout"
     assert paths.breakout_events == paths.breakout_dir / "first_breakout_events.parquet"

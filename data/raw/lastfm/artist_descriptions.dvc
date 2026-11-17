@@ -1,0 +1,6 @@
+outs:
+- md5: c13745f8bb22bea1b5fa586577547a69.dir
+  size: 26512293
+  nfiles: 3
+  hash: md5
+  path: artist_descriptions

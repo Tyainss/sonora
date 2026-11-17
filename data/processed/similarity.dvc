@@ -1,0 +1,6 @@
+outs:
+- md5: abebf7004c967ef8beee538453dc64f4.dir
+  size: 19951008
+  nfiles: 5
+  hash: md5
+  path: similarity

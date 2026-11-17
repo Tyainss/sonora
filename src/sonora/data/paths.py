@@ -21,6 +21,14 @@ class DataPaths:
         return self.raw_lastfm_dir / "scrobbles.integrity.json"
 
     @property
+    def raw_lastfm_artist_tags_dir(self) -> Path:
+        return self.raw_lastfm_dir / "artist_tags"
+
+    @property
+    def raw_lastfm_artist_descriptions_dir(self) -> Path:
+        return self.raw_lastfm_dir / "artist_descriptions"
+
+    @property
     def interim_dir(self) -> Path:
         return self.data_dir / "interim"
 
@@ -37,6 +45,14 @@ class DataPaths:
         return self.curated_dir / "artists.parquet"
 
     @property
+    def curated_artist_tags(self) -> Path:
+        return self.curated_dir / "artist_tags.parquet"
+
+    @property
+    def curated_artist_descriptions(self) -> Path:
+        return self.curated_dir / "artist_descriptions.parquet"
+
+    @property
     def curated_artist_aliases(self) -> Path:
         return self.curated_dir / "artist_aliases.parquet"
 
@@ -51,6 +67,42 @@ class DataPaths:
     @property
     def curated_listening_events(self) -> Path:
         return self.curated_dir / "listening_events.parquet"
+
+    @property
+    def artist_summary_embeddings(self) -> Path:
+        return (
+            self.data_dir / "processed" / "similarity" / "artist_summary_embeddings.parquet"
+        )
+
+    @property
+    def artist_summary_embeddings_metadata(self) -> Path:
+        return self.artist_summary_embeddings.with_suffix(".json")
+
+    @property
+    def artist_tag_embeddings(self) -> Path:
+        return self.data_dir / "processed" / "similarity" / "artist_tag_embeddings.parquet"
+
+    @property
+    def artist_tag_embeddings_metadata(self) -> Path:
+        return self.artist_tag_embeddings.with_suffix(".json")
+
+    @property
+    def artist_similarity_references(self) -> Path:
+        return self.data_dir / "evaluation" / "artist_similarity_references.json"
+
+    @property
+    def artist_similarity_llm_references(self) -> Path:
+        return self.data_dir / "evaluation" / "artist_similarity_llm_references.csv"
+
+    @property
+    def artist_similarity_reference_metadata(self) -> Path:
+        return self.data_dir / "evaluation" / "artist_similarity_reference_metadata.json"
+
+    @property
+    def artist_similarity_evaluation(self) -> Path:
+        return (
+            self.data_dir / "processed" / "similarity" / "artist_similarity_evaluation.json"
+        )
 
     @property
     def breakout_dir(self) -> Path:
