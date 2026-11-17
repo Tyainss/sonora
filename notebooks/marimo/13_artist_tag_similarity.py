@@ -749,5 +749,220 @@ def _(
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Does tag importance improve BGE-M3?
+
+    Compare the unweighted tags with three ways of marking important tags:
+    weights of at least 50, weights of at least 30, or the top three tags.
+    All use the same cleaned tags and BGE-M3 model.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(artist_selector, artist_tags, mo, pl):
+    from sonora.similarity.embeddings import format_artist_tag_text
+
+    _tags = artist_tags.filter(
+        pl.col("artist_id") == artist_selector.value
+    ).row(0, named=True)["tags"]
+    _variants = (
+        ("Unweighted", "unweighted"),
+        ("Weight ≥50", "threshold_50"),
+        ("Weight ≥30", "threshold_30"),
+        ("Top 3", "top_3"),
+    )
+    _rows = [
+        {
+            "Representation": label,
+            "BGE-M3 input": format_artist_tag_text(_tags, variant=variant),
+        }
+        for label, variant in _variants
+    ]
+    mo.ui.table(pl.DataFrame(_rows), selection=None, page_size=4)
+    return
+
+
+@app.cell
+def _(paths, pl):
+    from sonora.similarity.embeddings import artist_tag_embedding_path
+
+    _labels = {
+        "threshold_50": "BGE-M3 ≥50",
+        "threshold_30": "BGE-M3 ≥30",
+        "top_3": "BGE-M3 top 3",
+    }
+    weighted_tag_embeddings = {}
+    for _variant, _label in _labels.items():
+        _path = artist_tag_embedding_path(paths, variant=_variant)
+        if _path.exists():
+            weighted_tag_embeddings[_label] = pl.read_parquet(_path)
+    return (weighted_tag_embeddings,)
+
+
+@app.cell(hide_code=True)
+def _(
+    artist_tags,
+    evaluation_snapshot,
+    find_similar_tag_artists,
+    mo,
+    pl,
+    reference_rankings,
+    reference_sets,
+    weighted_tag_embeddings,
+):
+    from sonora.similarity.evaluation import score_artist_similarity as _score_artist_similarity
+
+    weighted_rankings = {"BGE-M3 tags": reference_rankings["BGE-M3 tags"]}
+    weighted_scores = None
+    if reference_sets is None:
+        _output = mo.md("No reference evaluation available.")
+    elif not weighted_tag_embeddings:
+        _output = mo.md("No tag-importance embeddings found yet.")
+    else:
+        _candidates = set(evaluation_snapshot["candidate_artist_ids"])
+        for _label, _embeddings in weighted_tag_embeddings.items():
+            _available = set(_embeddings["artist_id"])
+            _rankings = {}
+            for _reference in evaluation_snapshot["references"]:
+                _id = _reference["artist_id"]
+                if _id not in _available:
+                    continue
+                _matches = find_similar_tag_artists(
+                    _embeddings,
+                    artist_tags,
+                    _id,
+                    top_k=10,
+                    candidate_ids=_candidates,
+                )
+                _rankings[_id] = _matches["artist_id"].to_list()
+            weighted_rankings[_label] = _rankings
+
+        weighted_scores = pl.concat(
+            [
+                _score_artist_similarity(_set, weighted_rankings).with_columns(
+                    pl.lit(_name).alias("Reference set")
+                )
+                for _name, _set in reference_sets.items()
+            ]
+        )
+        _totals = (
+            weighted_scores.group_by("Reference set", "Approach")
+            .agg(
+                pl.col("Available").sum().alias("Artists evaluated"),
+                (pl.col("Top 5").filter(pl.col("Available")).mean() / 5)
+                .round(3)
+                .alias("Recall@5"),
+                (pl.col("Top 10").filter(pl.col("Available")).mean() / 5)
+                .round(3)
+                .alias("Recall@10"),
+                pl.col("NDCG@10").mean().round(3).alias("NDCG@10"),
+            )
+            .sort("Reference set", "Approach")
+        )
+        _output = mo.ui.table(
+            _totals, selection=None, page_size=_totals.height
+        )
+    _output
+    return weighted_rankings, weighted_scores
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Where do weights help or hurt?
+
+    Each value shows NDCG@10 and the change from unweighted BGE-M3.
+    Positive changes mean better ranking of the reference matches.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, pl, weighted_scores):
+    if weighted_scores is None:
+        _output = None
+    else:
+        _sections = []
+        _labels = ["BGE-M3 tags", "BGE-M3 ≥50", "BGE-M3 ≥30", "BGE-M3 top 3"]
+        _available_labels = [
+            label for label in _labels if label in set(weighted_scores["Approach"])
+        ]
+        for _set in weighted_scores["Reference set"].unique(maintain_order=True):
+            _scores = weighted_scores.filter(pl.col("Reference set") == _set)
+            _by_artist = {}
+            for _score in _scores.iter_rows(named=True):
+                _by_artist.setdefault(_score["Artist"], {})[_score["Approach"]] = _score
+            _rows = []
+            for _artist, _approaches in _by_artist.items():
+                _baseline = _approaches["BGE-M3 tags"]["NDCG@10"]
+                _row = {"Artist": _artist}
+                _row["BGE-M3 tags"] = (
+                    f"{_baseline:.3f}" if _baseline is not None else "Unavailable"
+                )
+                for _label in _available_labels[1:]:
+                    _value = _approaches[_label]["NDCG@10"]
+                    _row[_label] = (
+                        f"{_value:.3f} ({_value - _baseline:+.3f})"
+                        if _value is not None and _baseline is not None
+                        else "Unavailable"
+                    )
+                _rows.append(_row)
+            _sections.extend(
+                [
+                    mo.md(f"**{_set}**"),
+                    mo.ui.table(
+                        pl.DataFrame(_rows), selection=None, page_size=len(_rows)
+                    ),
+                ]
+            )
+        _output = mo.vstack(_sections)
+    _output
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    artist_tags,
+    mo,
+    pl,
+    reference_selector,
+    reference_set_selector,
+    reference_sets,
+    weighted_rankings,
+    weighted_scores,
+):
+    if reference_selector is None or weighted_scores is None:
+        _output = None
+    else:
+        _artist_id = reference_selector.value
+        _set = reference_sets[reference_set_selector.value]
+        _reference = next(
+            ref for ref in _set["references"] if ref["artist_id"] == _artist_id
+        )
+        _expected = {match["artist_id"] for match in _reference["matches"]}
+        _names = dict(artist_tags.select("artist_id", "canonical_name").iter_rows())
+        _rows = []
+        for _rank in range(10):
+            _row = {"Rank": _rank + 1}
+            for _label, _rankings in weighted_rankings.items():
+                _matches = _rankings.get(_artist_id, [])
+                _id = _matches[_rank] if _rank < len(_matches) else None
+                _name = _names[_id] if _id is not None else ""
+                _row[_label] = f"✓ {_name}" if _id in _expected else _name
+            _rows.append(_row)
+        _output = mo.vstack(
+            [
+                mo.md(f"**{_reference['canonical_name']}** - top ten matches"),
+                mo.ui.table(pl.DataFrame(_rows), selection=None, page_size=10),
+                mo.md("✓ = reference match. Rows 1–5 are the top five results."),
+            ]
+        )
+    _output
+    return
+
+
 if __name__ == "__main__":
     app.run()

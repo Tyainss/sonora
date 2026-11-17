@@ -324,3 +324,69 @@ def test_tag_embeddings_reject_bad_input(setup):
     ])])
     with pytest.raises(ValueError, match="No artists"):
         embeddings.build_artist_tag_embeddings(paths=paths)
+
+
+def test_tag_importance_text_representations():
+    tags = [
+        {"name": "Noise Rock", "weight": 55},
+        {"name": "Post-Punk", "weight": 100},
+        {"name": "punk-rock", "weight": 75},
+        {"name": "Punk Rock", "weight": 20},
+        {"name": "Shoegaze", "weight": 32},
+        {"name": "Math Rock", "weight": 10},
+        {"name": "spotify", "weight": 99},
+    ]
+    assert embeddings.format_artist_tag_text(tags) == (
+        "math rock, noise rock, post punk, punk rock, shoegaze"
+    )
+    assert embeddings.format_artist_tag_text(tags, variant="threshold_50") == (
+        "Main tags: post punk, punk rock, noise rock. "
+        "Other tags: shoegaze, math rock"
+    )
+    assert embeddings.format_artist_tag_text(tags, variant="threshold_30") == (
+        "Main tags: post punk, punk rock, noise rock, shoegaze. "
+        "Other tags: math rock"
+    )
+    assert embeddings.format_artist_tag_text(tags, variant="top_3") == (
+        "Main tags: post punk, punk rock, noise rock. "
+        "Other tags: shoegaze, math rock"
+    )
+    assert embeddings.format_artist_tag_text(
+        [{"name": "folk", "weight": 12}], variant="threshold_50"
+    ) == "Other tags: folk"
+    assert embeddings.format_artist_tag_text(
+        [{"name": "folk", "weight": 50}], variant="threshold_50"
+    ) == "Main tags: folk"
+    with pytest.raises(ValueError, match="Unknown tag variant"):
+        embeddings.format_artist_tag_text(tags, variant="unknown")
+
+
+def test_tag_embedding_variants_are_saved_and_cached_separately(setup):
+    paths, model = setup
+    _write_tags(paths, [
+        ("a", "Alpha", "success", [
+            {"name": "Jazz", "weight": 100},
+            {"name": "Funk", "weight": 35},
+        ]),
+        ("b", "Beta", "success", [
+            {"name": "Rock", "weight": 95},
+            {"name": "Punk", "weight": 60},
+        ]),
+    ])
+    baseline = embeddings.build_artist_tag_embeddings(paths=paths)
+    original = baseline.read_bytes()
+    for variant in ("threshold_50", "threshold_30", "top_3"):
+        output = embeddings.build_artist_tag_embeddings(paths=paths, variant=variant)
+        assert output == embeddings.artist_tag_embedding_path(paths, variant=variant)
+        assert output != baseline
+        assert pl.read_parquet(output).schema == embeddings._TAG_SCHEMA
+        metadata = json.loads(output.with_suffix(".json").read_text())
+        assert variant in metadata["preprocessing"]
+        assert metadata["embeddings_sha256"] == embeddings._sha256(output)
+    assert baseline.read_bytes() == original
+    assert len(model.calls) == 4
+    embeddings.build_artist_tag_embeddings(paths=paths, variant="threshold_50")
+    assert len(model.calls) == 4
+    assert embeddings.artist_tag_embedding_path(paths) == baseline
+    with pytest.raises(ValueError, match="Unknown tag variant"):
+        embeddings.build_artist_tag_embeddings(paths=paths, variant="unknown")

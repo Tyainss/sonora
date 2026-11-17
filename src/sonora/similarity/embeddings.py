@@ -16,6 +16,7 @@ MODEL_ID = "BAAI/bge-m3"
 MODEL_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 EMBEDDING_DIMENSIONS = 1024
 BATCH_SIZE = 16
+TAG_VARIANTS = ("unweighted", "threshold_50", "threshold_30", "top_3")
 
 _SCHEMA = {
     "artist_id": pl.String,
@@ -62,7 +63,44 @@ def _summaries(paths: DataPaths) -> dict[str, tuple[str, str]]:
     return dict(sorted(rows.items()))
 
 
-def _tags(paths: DataPaths) -> dict[str, tuple[str, str]]:
+def format_artist_tag_text(tags: list[dict], *, variant: str = "unweighted") -> str:
+    """Prepare cleaned artist tags for a BGE-M3 text input."""
+    if variant not in TAG_VARIANTS:
+        raise ValueError(f"Unknown tag variant: {variant}")
+    cleaned = clean_artist_tags(tags)
+    if variant == "unweighted":
+        return ", ".join(sorted(tag["name"] for tag in cleaned))
+
+    ranked = sorted(cleaned, key=lambda tag: (-tag["weight"], tag["name"]))
+    if variant == "top_3":
+        main, other = ranked[:3], ranked[3:]
+    else:
+        threshold = 50 if variant == "threshold_50" else 30
+        main = [tag for tag in ranked if tag["weight"] >= threshold]
+        other = [tag for tag in ranked if tag["weight"] < threshold]
+
+    sections = []
+    if main:
+        sections.append("Main tags: " + ", ".join(tag["name"] for tag in main))
+    if other:
+        sections.append("Other tags: " + ", ".join(tag["name"] for tag in other))
+    return ". ".join(sections)
+
+
+def artist_tag_embedding_path(paths: DataPaths, *, variant: str = "unweighted") -> Path:
+    """Keep experimental tag embeddings separate from the unweighted baseline."""
+    if variant not in TAG_VARIANTS:
+        raise ValueError(f"Unknown tag variant: {variant}")
+    if variant == "unweighted":
+        return paths.artist_tag_embeddings
+    return paths.artist_tag_embeddings.with_name(
+        f"{paths.artist_tag_embeddings.stem}_{variant}.parquet"
+    )
+
+
+def _tags(
+    paths: DataPaths, *, variant: str = "unweighted"
+) -> dict[str, tuple[str, str]]:
     artist_tags = pl.read_parquet(paths.curated_artist_tags)
     required = {"artist_id", "canonical_name", "status", "tags"}
     if not required.issubset(artist_tags.columns):
@@ -78,9 +116,9 @@ def _tags(paths: DataPaths) -> dict[str, tuple[str, str]]:
             continue
         if any(tag["weight"] < 0 for tag in tags):
             raise ValueError("Tag weights must be non-negative")
-        names = sorted(tag["name"] for tag in clean_artist_tags(tags))
-        if names:
-            rows[artist_id] = (name, ", ".join(names))
+        text = format_artist_tag_text(tags, variant=variant)
+        if text:
+            rows[artist_id] = (name, text)
     return dict(sorted(rows.items()))
 
 
@@ -243,16 +281,24 @@ def build_artist_summary_embeddings(*, paths: DataPaths = DEFAULT_DATA_PATHS) ->
     )
 
 
-def build_artist_tag_embeddings(*, paths: DataPaths = DEFAULT_DATA_PATHS) -> Path:
-    """Persist BGE-M3 vectors built from cleaned tag names, without tag weights."""
+def build_artist_tag_embeddings(
+    *, paths: DataPaths = DEFAULT_DATA_PATHS, variant: str = "unweighted"
+) -> Path:
+    """Persist BGE-M3 tag embeddings for one text representation."""
+    output = artist_tag_embedding_path(paths, variant=variant)
+    preprocessing = (
+        "sonora.similarity.tags.clean_artist_tags; sorted tag names"
+        if variant == "unweighted"
+        else f"sonora.similarity.embeddings.format_artist_tag_text; {variant}"
+    )
     return _build_embeddings(
         source=paths.curated_artist_tags,
-        texts=_tags(paths),
-        output=paths.artist_tag_embeddings,
-        metadata_path=paths.artist_tag_embeddings_metadata,
+        texts=_tags(paths, variant=variant),
+        output=output,
+        metadata_path=output.with_suffix(".json"),
         schema=_TAG_SCHEMA,
-        preprocessing="sonora.similarity.tags.clean_artist_tags; sorted tag names",
-        label="tags",
+        preprocessing=preprocessing,
+        label=f"tags ({variant})",
     )
 
 
@@ -350,9 +396,12 @@ def main() -> None:
         description="Build BGE-M3 artist embeddings"
     )
     parser.add_argument("--input", choices=("summary", "tags"), default="summary")
+    parser.add_argument("--tag-variant", choices=TAG_VARIANTS, default="unweighted")
     args = parser.parse_args()
+    if args.input != "tags" and args.tag_variant != "unweighted":
+        parser.error("--tag-variant requires --input tags")
     path = (
-        build_artist_tag_embeddings()
+        build_artist_tag_embeddings(variant=args.tag_variant)
         if args.input == "tags"
         else build_artist_summary_embeddings()
     )
